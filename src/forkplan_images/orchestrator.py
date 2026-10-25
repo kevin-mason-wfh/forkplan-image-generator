@@ -44,6 +44,7 @@ class Heartbeat:
         except Exception:
             self.lost.set()
             raise LeaseLost("Lease renewal failed; processing stopped") from None
+        self.check()
         try:
             result = operation()
         finally:
@@ -117,7 +118,7 @@ class Orchestrator:
             try:
                 work = [self.repository.redo(options.redo, owner, self.lease_seconds, options.note)]
             except ClaimConflict:
-                summary.results.append(Result(options.redo, "skipped", "Redo refused: valid lease"))
+                summary.results.append(Result(options.redo, "failed", "Redo refused: valid lease"))
                 return summary
         else:
             work = self.repository.candidates(options.limit, options.ids, options.retry_failures)
@@ -170,11 +171,11 @@ class Orchestrator:
                 try:
                     if attempt.stage == Stage.SELECTED:
                         description = heartbeat.call(lambda: self.describer.describe(work.recipe))
-                        advance(Stage.DESCRIBED, description=validate(description))
+                        advance(Stage.DESCRIBED, description=validate(description), settings=self.settings)
                     if attempt.stage == Stage.DESCRIBED:
                         advance(Stage.PROMPT_BUILT,
                                 final_prompt=build_prompt(work.recipe, attempt.description),
-                                prompt_version=PROMPT_VERSION, settings=self.settings)
+                                prompt_version=PROMPT_VERSION, settings=attempt.settings or self.settings)
                     if attempt.stage == Stage.GENERATING:
                         if storage.exists(attempt.original_storage_key):
                             advance(Stage.GENERATED, original_key=attempt.original_storage_key)
@@ -183,9 +184,11 @@ class Orchestrator:
                     if attempt.stage == Stage.PROMPT_BUILT:
                         # update() commits before returning, before any billed dispatch.
                         update(stage=Stage.GENERATING)
-                        summary.dispatched += 1
-                        original = heartbeat.call(
-                            lambda: self.generator.generate(attempt.final_prompt, attempt.settings))
+                        def generate() -> bytes:
+                            summary.dispatched += 1
+                            return self.generator.generate(attempt.final_prompt, attempt.settings)
+
+                        original = heartbeat.call(generate)
                         heartbeat.call(lambda: storage.put(attempt.original_storage_key, original))
                         advance(Stage.GENERATED, original_key=attempt.original_storage_key)
                     if attempt.stage == Stage.GENERATED:
@@ -235,5 +238,6 @@ class Orchestrator:
             return
         try:
             repository.release(attempt.id, token)
-        except LeaseLost:
+        except Exception:
+            # Never retry release: another worker may already own the attempt.
             pass

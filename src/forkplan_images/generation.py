@@ -32,7 +32,7 @@ class OpenAIGenerator:
                 quality=settings["quality"], size=settings["size"], output_format="png",
             )
         except APIStatusError as exc:
-            uncertain = exc.status_code >= 500 or exc.status_code == 408
+            uncertain = not (400 <= exc.status_code < 500 and exc.status_code != 408)
             raise GenerationError(str(exc), uncertain=uncertain) from None
         except Exception as exc:
             # Connection errors and unknown failures may follow a billed dispatch.

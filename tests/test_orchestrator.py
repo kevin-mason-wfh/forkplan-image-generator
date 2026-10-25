@@ -258,3 +258,38 @@ def test_claim_conflict_is_not_a_failure(tmp_path):
     assert result.results[0].status == "skipped"
     assert result.exit_code == 0
     describe.describe.assert_not_called()
+
+
+def test_renewals_during_generation_and_upload(tmp_path):
+    runner, repo, _, _, generate, upload, _ = setup(tmp_path)
+    runner.lease_seconds = 1
+    observed = []
+
+    def long_operation(result):
+        before = sum(op == "renew" for op, _ in repo.writes)
+        time.sleep(0.75)
+        observed.append(sum(op == "renew" for op, _ in repo.writes) - before)
+        return result
+
+    generate.generate.side_effect = lambda *args: long_operation(png())
+    upload.upload.side_effect = lambda *args: long_operation(None)
+    assert runner.run(Options()).exit_code == 0
+    assert all(count >= 1 for count in observed)
+
+
+def test_lost_lease_during_generation_does_not_write_original(tmp_path):
+    runner, repo, store, _, generate, upload, _ = setup(tmp_path)
+    runner.lease_seconds = 1
+
+    def steal(*args):
+        next(iter(repo.attempts.values())).lease_token = uuid4()
+        time.sleep(0.75)
+        return png()
+
+    generate.generate.side_effect = steal
+    result = runner.run(Options())
+    assert result.results[0].status == "lease_lost"
+    a = next(iter(repo.attempts.values()))
+    assert not store.exists(a.original_storage_key)
+    assert a.stage == Stage.GENERATING
+    upload.presign.assert_not_called()

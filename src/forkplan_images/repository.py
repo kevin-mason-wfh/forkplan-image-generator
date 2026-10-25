@@ -107,6 +107,11 @@ class PostgresRepository:
         if not locked:
             raise ClaimConflict("Resource is being claimed")
 
+    def _lock_attempt(self, conn: Connection, attempt_id: UUID) -> None:
+        # Lock only; ownership is still checked atomically by the following UPDATE.
+        conn.execute(text("SELECT id FROM catalog_image_generations WHERE id = :id FOR UPDATE"),
+                     {"id": attempt_id})
+
     def _insert(self, conn: Connection, resource_id: UUID, number: int, owner: str,
                 seconds: int, note: str | None = None, attempt_id: UUID | None = None) -> Attempt:
         row = conn.execute(text("""
@@ -114,7 +119,7 @@ class PostgresRepository:
                 (id, resource_id, resource_type, attempt_number, stage,
                  last_successful_stage, lease_owner, lease_token, lease_expires_at, redo_note)
             VALUES (:id, :resource_id, 'recipe', :number, 'selected', 'selected',
-                    :owner, :token, now() + :seconds * interval '1 second', :note)
+                    :owner, :token, clock_timestamp() + :seconds * interval '1 second', :note)
             RETURNING *
         """), {"id": attempt_id or uuid4(), "resource_id": resource_id, "number": number,
                "owner": owner, "token": uuid4(), "seconds": seconds,
@@ -125,15 +130,16 @@ class PostgresRepository:
         with self.engine.begin() as conn:
             self._lock_resource(conn, work.recipe.id)
             if work.attempt:
+                self._lock_attempt(conn, work.attempt.id)
                 row = conn.execute(text("""
                     UPDATE catalog_image_generations SET
                         lease_owner = :owner, lease_token = :token,
-                        lease_expires_at = now() + :seconds * interval '1 second',
+                        lease_expires_at = clock_timestamp() + :seconds * interval '1 second',
                         stage = CASE WHEN stage = 'failed' THEN last_successful_stage ELSE stage END,
                         retry_count = retry_count + CASE WHEN stage = 'failed' THEN 1 ELSE 0 END,
                         error_type = NULL, error_message = NULL, updated_at = now()
                     WHERE id = :id AND stage = :expected
-                      AND (lease_expires_at IS NULL OR lease_expires_at <= now())
+                      AND (lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp())
                       AND stage IN ('selected','described','prompt_built','generating',
                                     'generated','processed','presigned','uploaded','failed')
                     RETURNING *
@@ -174,7 +180,7 @@ class PostgresRepository:
                     SET stage = 'retired', superseded_by = :successor, updated_at = now(),
                         lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL
                     WHERE id = :id AND lease_token IS NOT DISTINCT FROM :token
-                      AND (lease_expires_at IS NULL OR lease_expires_at <= now())
+                      AND (lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp())
                 """), {"id": previous["id"], "token": previous["lease_token"],
                        "successor": successor_id})
                 if result.rowcount != 1:
@@ -193,9 +199,10 @@ class PostgresRepository:
         if changes.get("stage") == Stage.COMPLETED:
             assignments.append("completed_at = now()")
         with self.engine.begin() as conn:
+            self._lock_attempt(conn, attempt_id)
             row = conn.execute(text(f"""
                 UPDATE catalog_image_generations SET {', '.join(assignments)}, updated_at = now()
-                WHERE id = :id AND lease_token = :token AND lease_expires_at > now()
+                WHERE id = :id AND lease_token = :token AND lease_expires_at > clock_timestamp()
                 RETURNING *
             """), params).mappings().first()
             if row is None:
@@ -204,20 +211,22 @@ class PostgresRepository:
 
     def renew(self, attempt_id: UUID, token: UUID, seconds: int) -> None:
         with self.engine.begin() as conn:
+            self._lock_attempt(conn, attempt_id)
             result = conn.execute(text("""
                 UPDATE catalog_image_generations
-                SET lease_expires_at = now() + :seconds * interval '1 second', updated_at = now()
-                WHERE id = :id AND lease_token = :token AND lease_expires_at > now()
+                SET lease_expires_at = clock_timestamp() + :seconds * interval '1 second', updated_at = now()
+                WHERE id = :id AND lease_token = :token AND lease_expires_at > clock_timestamp()
             """), {"id": attempt_id, "token": token, "seconds": seconds})
             if result.rowcount != 1:
                 raise LeaseLost("Lease renewal rejected")
 
     def release(self, attempt_id: UUID, token: UUID) -> None:
         with self.engine.begin() as conn:
+            self._lock_attempt(conn, attempt_id)
             result = conn.execute(text("""
                 UPDATE catalog_image_generations
                 SET lease_owner = NULL, lease_token = NULL, lease_expires_at = NULL, updated_at = now()
-                WHERE id = :id AND lease_token = :token AND lease_expires_at > now()
+                WHERE id = :id AND lease_token = :token AND lease_expires_at > clock_timestamp()
             """), {"id": attempt_id, "token": token})
             if result.rowcount != 1:
                 raise LeaseLost("Lease release rejected")

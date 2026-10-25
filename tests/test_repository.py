@@ -1,10 +1,12 @@
 from uuid import uuid4
+from dataclasses import asdict
+from unittest.mock import MagicMock
 
 import pytest
 
 from fakes import MemoryRepository
-from forkplan_images.repository import Work
-from forkplan_images.state import ClaimConflict, LeaseLost, Recipe, Stage
+from forkplan_images.repository import PostgresRepository, Work
+from forkplan_images.state import Attempt, ClaimConflict, LeaseLost, Recipe, Stage
 
 
 def test_claim_expiry_and_token_fencing():
@@ -52,3 +54,39 @@ def test_retry_keeps_progress_and_clears_errors():
     assert retried.stage == Stage.PROCESSED
     assert retried.retry_count == 1
     assert retried.error_message is None
+
+
+def test_postgres_update_is_parameterized_fenced_and_redacted():
+    engine = MagicMock()
+    connection = engine.begin.return_value.__enter__.return_value
+    attempt = Attempt(uuid4())
+    connection.execute.return_value.mappings.return_value.first.return_value = asdict(attempt)
+    repository = PostgresRepository(engine, ("private-placeholder",))
+    message = "private-placeholder https://bucket.example.test/?signature=private-placeholder"
+    repository.update(attempt.id, uuid4(), stage=Stage.FAILED, error_message=message)
+    calls = connection.execute.call_args_list
+    assert "FOR UPDATE" in str(calls[0].args[0])
+    sql, params = calls[1].args
+    assert "lease_token = :token" in str(sql)
+    assert "lease_expires_at > clock_timestamp()" in str(sql)
+    assert message not in str(sql)
+    assert "private-placeholder" not in params["error_message"]
+    assert "https://" not in params["error_message"]
+    connection.execute.return_value.mappings.return_value.first.return_value = None
+    with pytest.raises(LeaseLost):
+        repository.update(attempt.id, uuid4(), stage=Stage.COMPLETED)
+
+
+@pytest.mark.parametrize("method", ["renew", "release"])
+def test_postgres_lease_mutation_fenced_after_lock(method):
+    engine = MagicMock()
+    connection = engine.begin.return_value.__enter__.return_value
+    connection.execute.return_value.rowcount = 0
+    repository = PostgresRepository(engine)
+    with pytest.raises(LeaseLost):
+        args = (uuid4(), uuid4(), 300) if method == "renew" else (uuid4(), uuid4())
+        getattr(repository, method)(*args)
+    calls = connection.execute.call_args_list
+    assert "FOR UPDATE" in str(calls[0].args[0])
+    assert "lease_token = :token" in str(calls[1].args[0])
+    assert "clock_timestamp()" in str(calls[1].args[0])

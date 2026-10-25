@@ -5,7 +5,7 @@ from uuid import UUID
 import httpx
 from pydantic import BaseModel, Field
 
-from .network import request, require_https
+from .network import Checkpoint, request, require_https
 
 
 class Presign(BaseModel):
@@ -17,8 +17,9 @@ class Presign(BaseModel):
 
 
 class Uploader(Protocol):
-    def presign(self, resource_id: UUID, filename: str, length: int) -> Presign: ...
-    def upload(self, presign: Presign, data: bytes) -> None: ...
+    def presign(self, resource_id: UUID, filename: str, length: int, *,
+                checkpoint: Checkpoint | None = None) -> Presign: ...
+    def upload(self, presign: Presign, data: bytes, *, checkpoint: Checkpoint | None = None) -> None: ...
 
 
 class HttpUploader:
@@ -27,13 +28,15 @@ class HttpUploader:
         self.base_url = require_https(base_url).rstrip("/")
         self.token = token
 
-    def presign(self, resource_id: UUID, filename: str, length: int) -> Presign:
+    def presign(self, resource_id: UUID, filename: str, length: int, *,
+                checkpoint: Checkpoint | None = None) -> Presign:
         response = request(
             self.client, "POST",
             f"{self.base_url}/v1/catalog/recipes/{resource_id}/image/presign",
             headers={"Authorization": "Bearer " + self.token, "Content-Type": "application/json"},
             content=json.dumps({"filename": filename, "content_type": "image/jpeg",
                                 "content_length": length}).encode(),
+            checkpoint=checkpoint,
         )
         presign = Presign.model_validate(response.json())
         require_https(presign.upload_url)
@@ -41,6 +44,6 @@ class HttpUploader:
             raise ValueError("Presign returned incompatible content type")
         return presign
 
-    def upload(self, presign: Presign, data: bytes) -> None:
+    def upload(self, presign: Presign, data: bytes, *, checkpoint: Checkpoint | None = None) -> None:
         request(self.client, "PUT", presign.upload_url,
-                headers={"Content-Type": presign.content_type}, content=data)
+                headers={"Content-Type": presign.content_type}, content=data, checkpoint=checkpoint)

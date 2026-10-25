@@ -3,10 +3,13 @@ from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
+import httpx
+from openai import APIStatusError
 
 from forkplan_images.descriptions import DishDescription, OpenAIDescriber, validate
 from forkplan_images.prompts import PROMPT_VERSION, build_prompt
 from forkplan_images.state import Recipe
+from forkplan_images.state import LeaseLost
 
 
 @pytest.mark.parametrize("value", ["short", "x" * 2001,
@@ -36,3 +39,16 @@ def test_typed_parsing_and_no_ingredient_name_requirement():
     client.responses.parse.return_value = SimpleNamespace(output_parsed=None)
     with pytest.raises(ValueError):
         OpenAIDescriber(client, "configured-model").describe(recipe)
+
+
+def test_text_retries_are_fenced_on_ownership_loss():
+    client = Mock()
+    client.with_options.return_value = client
+    response = httpx.Response(503, request=httpx.Request("POST", "https://api.openai.com/v1/responses"))
+    client.responses.parse.side_effect = APIStatusError("unavailable", response=response, body={})
+    checkpoint = Mock(side_effect=[None, LeaseLost("Ownership lost")])
+    with pytest.raises(LeaseLost):
+        OpenAIDescriber(client, "configured-model").describe(
+            Recipe(uuid4(), "Soup"), checkpoint=checkpoint)
+    assert client.responses.parse.call_count == 1
+    client.with_options.assert_called_once_with(timeout=60.0, max_retries=0)

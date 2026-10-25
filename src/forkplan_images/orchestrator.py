@@ -37,7 +37,7 @@ class Heartbeat:
         if self.lost.is_set():
             raise LeaseLost("Lease renewal failed; processing stopped")
 
-    def call(self, operation: Callable[[], T]) -> T:
+    def fence(self) -> None:
         self.check()
         try:
             self.repository.renew(self.attempt.id, self.attempt.lease_token, self.seconds)
@@ -45,6 +45,9 @@ class Heartbeat:
             self.lost.set()
             raise LeaseLost("Lease renewal failed; processing stopped") from None
         self.check()
+
+    def call(self, operation: Callable[[], T]) -> T:
+        self.fence()
         try:
             result = operation()
         finally:
@@ -170,7 +173,8 @@ class Orchestrator:
             with Heartbeat(repository, attempt, self.lease_seconds) as heartbeat:
                 try:
                     if attempt.stage == Stage.SELECTED:
-                        description = heartbeat.call(lambda: self.describer.describe(work.recipe))
+                        description = heartbeat.call(lambda: self.describer.describe(
+                            work.recipe, checkpoint=heartbeat.fence))
                         advance(Stage.DESCRIBED, description=validate(description), settings=self.settings)
                     if attempt.stage == Stage.DESCRIBED:
                         advance(Stage.PROMPT_BUILT,
@@ -186,7 +190,8 @@ class Orchestrator:
                         update(stage=Stage.GENERATING)
                         def generate() -> bytes:
                             summary.dispatched += 1
-                            return self.generator.generate(attempt.final_prompt, attempt.settings)
+                            return self.generator.generate(attempt.final_prompt, attempt.settings,
+                                                           checkpoint=heartbeat.fence)
 
                         original = heartbeat.call(generate)
                         heartbeat.call(lambda: storage.put(attempt.original_storage_key, original))
@@ -204,9 +209,10 @@ class Orchestrator:
                         data = heartbeat.call(lambda: storage.get(attempt.jpeg_key))
                         verify(data, attempt.jpeg_sha256, attempt.jpeg_length)
                         presign = heartbeat.call(lambda: self.uploader.presign(
-                            work.recipe.id, f"{attempt.id}.jpg", len(data)))
+                            work.recipe.id, f"{attempt.id}.jpg", len(data), checkpoint=heartbeat.fence))
                         advance(Stage.PRESIGNED)
-                        heartbeat.call(lambda: self.uploader.upload(presign, data))
+                        heartbeat.call(lambda: self.uploader.upload(
+                            presign, data, checkpoint=heartbeat.fence))
                         # The key belongs to THIS successful PUT, never an earlier presign.
                         advance(Stage.UPLOADED, image_key=presign.image_key)
                     if attempt.stage == Stage.UPLOADED:

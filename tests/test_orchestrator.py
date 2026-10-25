@@ -23,7 +23,7 @@ def setup(tmp_path, count=1):
     describe, generate, upload = Mock(), Mock(), Mock()
     describe.describe.return_value = "A smooth golden soup in a ceramic bowl."
     generate.generate.return_value = png()
-    upload.presign.side_effect = lambda *args: Presign(
+    upload.presign.side_effect = lambda *args, **kwargs: Presign(
         upload_url="https://bucket.example.test/put", public_url="https://cdn.example.test/image",
         image_key=f"key-{upload.presign.call_count}", content_type="image/jpeg", expires_in=300)
     runner = Orchestrator(repo, store, describe, generate, upload,
@@ -87,7 +87,7 @@ def test_generating_without_original_is_uncertain(tmp_path):
 def test_marker_committed_before_dispatch_and_original_before_generated(tmp_path):
     runner, repo, store, _, generate, _, _ = setup(tmp_path)
 
-    def generated(*args):
+    def generated(*args, **kwargs):
         a = next(iter(repo.attempts.values()))
         assert a.stage == Stage.GENERATING
         return png()
@@ -194,7 +194,7 @@ def test_crash_after_put_represigns_with_new_key(tmp_path):
 def test_lost_token_stops_without_error_write_or_more_work(tmp_path):
     runner, repo, _, describe, generate, upload, _ = setup(tmp_path)
 
-    def describe_and_steal(recipe):
+    def describe_and_steal(recipe, **kwargs):
         next(iter(repo.attempts.values())).lease_token = uuid4()
         return "A smooth golden soup in a ceramic bowl."
 
@@ -271,8 +271,8 @@ def test_renewals_during_generation_and_upload(tmp_path):
         observed.append(sum(op == "renew" for op, _ in repo.writes) - before)
         return result
 
-    generate.generate.side_effect = lambda *args: long_operation(png())
-    upload.upload.side_effect = lambda *args: long_operation(None)
+    generate.generate.side_effect = lambda *args, **kwargs: long_operation(png())
+    upload.upload.side_effect = lambda *args, **kwargs: long_operation(None)
     assert runner.run(Options()).exit_code == 0
     assert all(count >= 1 for count in observed)
 
@@ -281,7 +281,7 @@ def test_lost_lease_during_generation_does_not_write_original(tmp_path):
     runner, repo, store, _, generate, upload, _ = setup(tmp_path)
     runner.lease_seconds = 1
 
-    def steal(*args):
+    def steal(*args, **kwargs):
         next(iter(repo.attempts.values())).lease_token = uuid4()
         time.sleep(0.75)
         return png()

@@ -4,7 +4,8 @@ from typing import Protocol
 import httpx
 from openai import APIStatusError, OpenAI
 
-from .network import request
+from .network import Checkpoint, request
+from .state import LeaseLost
 
 
 IMAGE_TIMEOUT = 180.0
@@ -17,7 +18,7 @@ class GenerationError(RuntimeError):
 
 
 class Generator(Protocol):
-    def generate(self, prompt: str, settings: dict) -> bytes: ...
+    def generate(self, prompt: str, settings: dict, *, checkpoint: Checkpoint | None = None) -> bytes: ...
 
 
 class OpenAIGenerator:
@@ -25,7 +26,7 @@ class OpenAIGenerator:
         self.client = client.with_options(max_retries=0, timeout=IMAGE_TIMEOUT)
         self.downloads = downloads
 
-    def generate(self, prompt: str, settings: dict) -> bytes:
+    def generate(self, prompt: str, settings: dict, *, checkpoint: Checkpoint | None = None) -> bytes:
         try:
             response = self.client.images.generate(
                 model=settings["image_model"], prompt=prompt, n=1,
@@ -42,12 +43,14 @@ class OpenAIGenerator:
             if image.b64_json:
                 data = base64.b64decode(image.b64_json, validate=True)
             elif image.url:
-                data = request(self.downloads, "GET", image.url).content
+                data = request(self.downloads, "GET", image.url, checkpoint=checkpoint).content
             else:
                 raise ValueError("Image response contained no image")
             if not data:
                 raise ValueError("Image response was empty")
             return data
+        except LeaseLost:
+            raise
         except Exception as exc:
             # A failed download/decode must never cause another generation request.
             raise GenerationError(str(exc), uncertain=True) from None

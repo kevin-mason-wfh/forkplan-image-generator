@@ -7,6 +7,7 @@ import respx
 
 from forkplan_images.network import request
 from forkplan_images.uploads import HttpUploader
+from forkplan_images.state import LeaseLost
 
 
 @respx.mock
@@ -48,4 +49,20 @@ def test_redirect_is_not_followed():
         307, headers={"Location": "https://other.example.test/image"})
     with httpx.Client() as client, pytest.raises(httpx.HTTPStatusError):
         request(client, "PUT", "https://bucket.example.test/image", sleep=lambda _: None)
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_lost_ownership_prevents_network_retry():
+    route = respx.put("https://bucket.example.test/image").respond(503)
+    calls = []
+
+    def checkpoint():
+        calls.append(True)
+        if len(calls) == 2:
+            raise LeaseLost("Ownership lost after first request")
+
+    with httpx.Client() as client, pytest.raises(LeaseLost):
+        request(client, "PUT", "https://bucket.example.test/image",
+                checkpoint=checkpoint, sleep=lambda _: None)
     assert route.call_count == 1

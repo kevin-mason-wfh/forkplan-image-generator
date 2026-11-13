@@ -104,9 +104,14 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     try:
         summary = execute(config, options, arguments.batch_descriptions)
-    except Exception:
-        # Driver exceptions may contain DSN credentials not recognizable as URLs.
-        print("Run failed: check database connectivity, migration and configuration.", file=sys.stderr)
+    except Exception as exc:
+        # Driver exceptions may contain DSN credentials not recognizable as URLs: the class name is always safe to show,
+        # the (redacted) message only with -v.
+        print(f"Run failed ({type(exc).__name__}): check database connectivity, migration and configuration. "
+              "Re-run with -v for the redacted error.", file=sys.stderr)
+        if arguments.verbose:
+            detail = redact(str(exc), config.secrets).strip().splitlines()
+            print("  " + (detail[0][:300] if detail else "(no message)"), file=sys.stderr)
         return 1
     for result in summary.results:
         print(f"{result.resource_id}: {result.status}" +

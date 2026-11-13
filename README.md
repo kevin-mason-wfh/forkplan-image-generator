@@ -112,7 +112,7 @@ counts. Exit codes: **0** success/nothing to do (including ordinary claim
 conflicts or capped work), **1** any recipe failure, uncertainty, lease loss or
 refused redo, **2** usage/configuration error. A failed recipe does not stop
 other recipes. Runtime connection failures return 1 without exposing driver
-exception details. SDK/HTTP request logging is suppressed by the CLI; error
+exception details beyond the error class; add `-v` to see the redacted message (for example a missing table). SDK/HTTP request logging is suppressed by the CLI; error
 details are redacted before database persistence and output.
 
 ## Recommended models

@@ -14,10 +14,16 @@ from typing import Any
 # rates: input (text/image in), output_text (incl. reasoning), output_image
 RATES: dict[str, dict[str, float]] = {
     "gpt-4o-2024-08-06": {"input": 2.50, "output_text": 10.00},
+    # OpenAI model-page list prices (text in / out per 1M tokens); reasoning tokens are billed as output.
+    "gpt-5.4-mini": {"input": 0.75, "output_text": 4.50},
+    "gpt-5.4-nano": {"input": 0.20, "output_text": 1.25},
     # Image rate inferred from 1,120 tokens = $0.0672 per 1K image; verify at ai.google.dev/pricing.
     # UNVERIFIED third-party aggregator figures ($5 in / $30 image out per 1M); aggregators disagree, so confirm
     # on the OpenAI pricing page. Image *input* tokens may be billed higher ($8) than text input.
     "gpt-image-2": {"input": 5.00, "output_image": 30.00},
+    # gpt-image-2.6 flare and sunburst: same third-party figures as gpt-image-2; confirm on the OpenAI pricing page.
+    "gpt-image-2.6-flare": {"input": 5.00, "output_image": 30.00},
+    "gpt-image-2.6-sunburst": {"input": 5.00, "output_image": 30.00},
     "gemini-3.1-flash-image": {"input": 0.50, "output_text": 3.00, "output_image": 60.00},
     # UNVERIFIED third-party figures (~$0.134 and ~$0.034 per 1K image); confirm at ai.google.dev/pricing.
     "gemini-3-pro-image": {"input": 2.00, "output_text": 12.00, "output_image": 120.00},

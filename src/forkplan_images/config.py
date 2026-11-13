@@ -8,7 +8,7 @@ from sqlalchemy.engine import make_url
 from .network import IMAGE_TIMEOUT_SECONDS, require_https
 
 # Deliberately narrower than the API; expand only after checking official documentation.
-TEXT_MODELS = frozenset({"gpt-4o-2024-08-06"})
+TEXT_MODELS = frozenset({"gpt-4o-2024-08-06", "gpt-5.4-mini", "gpt-5.4-nano"})
 # Any GPT Image family ID (e.g. gpt-image-1.5, gpt-image-2, dated snapshots) is accepted so newer
 # models need no code change. gpt-image-1 is closed upstream; the API will reject it if used.
 IMAGE_MODEL_PATTERN = re.compile(r"gpt-image-[A-Za-z0-9][A-Za-z0-9._-]*")

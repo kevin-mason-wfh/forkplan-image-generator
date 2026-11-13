@@ -210,3 +210,10 @@ def test_words_from_the_recipes_own_ingredient_names_are_not_flagged():
     text = plain("A round pizza topped with fresh basil leaves and rich, hearty cheese.")
     assert style_problems(text) == ["fresh", "hearty", "rich"]
     assert style_problems(text, own_words(recipe)) == ["hearty", "rich"]
+
+
+def test_gpt5_models_are_called_without_temperature():
+    for model, expects_temperature in (("gpt-4o-2024-08-06", True), ("gpt-5.4-mini", False), ("gpt-5.4-nano", False)):
+        client = _client(plain("A plain plate holding the cooked dish."))
+        OpenAIDescriber(client, model).describe(Recipe(uuid4(), "Soup"))
+        assert ("temperature" in client.responses.parse.call_args.kwargs) is expects_temperature

@@ -59,7 +59,7 @@ All variables are documented with placeholders in `.env.example`.
 | Variable | Policy |
 | --- | --- |
 | `DATABASE_URL`, `API_BASE_URL`, `API_TOKEN`, `OPENAI_API_KEY` | Required |
-| `OPENAI_TEXT_MODEL` | Required; `gpt-4o-2024-08-06` |
+| `OPENAI_TEXT_MODEL` | Required; `gpt-4o-2024-08-06`, `gpt-5.4-mini` or `gpt-5.4-nano` (GPT-5 models are called without a temperature setting) |
 | `OPENAI_IMAGE_MODEL` | Required when `IMAGE_PROVIDER=openai`; any `gpt-image-*` ID (e.g. `gpt-image-1.5`); `gpt-image-1` is closed upstream |
 | `OPENAI_IMAGE_QUALITY` | OpenAI images only: `low`, `medium`, `high`, `auto`; default `medium` |
 | `OPENAI_IMAGE_SIZE` | OpenAI images only: square `1024x1024` only |

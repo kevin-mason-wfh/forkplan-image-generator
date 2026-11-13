@@ -114,10 +114,11 @@ class OpenAIDescriber:
 
     def _request(self, instructions: str, payload: str, text_format: type[BaseModel],
                  checkpoint: Checkpoint | None):
+        # GPT-5 reasoning models do not accept a temperature setting.
+        sampling = {} if self.model.startswith("gpt-5") else {"temperature": 0.2}
         response = retry_call(
             lambda: self.client.responses.parse(
-                model=self.model, instructions=instructions, temperature=0.2,
-                input=payload, text_format=text_format,
+                model=self.model, instructions=instructions, input=payload, text_format=text_format, **sampling,
             ),
             # 429 is deliberately not retried: an immediate retry is also rate limited and consumes more quota.
             lambda exc: isinstance(exc, APIConnectionError) or (

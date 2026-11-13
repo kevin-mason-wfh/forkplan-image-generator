@@ -42,6 +42,7 @@ def build_usage(provider: str, model: str, *, input_tokens: int = 0, output_text
         "output_text_tokens": int(output_text_tokens), "output_image_tokens": int(output_image_tokens),
         "reasoning_tokens": int(reasoning_tokens),
     }
+    usage["rates"] = dict(RATES[model]) if model in RATES else None  # snapshot: rates change, stored costs must stay auditable
     usage["cost_usd"] = estimate_cost(usage)
     return usage
 

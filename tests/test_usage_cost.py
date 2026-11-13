@@ -129,3 +129,31 @@ def test_describer_records_reasoning_tokens():
     describer = OpenAIDescriber(client, "gpt-5.4-mini")
     describer.describe(Recipe(uuid4(), "Soup"))
     assert describer.last_usage["reasoning_tokens"] == 300 and describer.last_usage["output_text_tokens"] == 400
+
+
+def test_a_rejected_description_still_records_the_calls_that_were_billed(tmp_path):
+    from forkplan_images.pricing import CostLedger
+    runner, repo, store, describe, generate, upload, recipes = setup(tmp_path)
+    runner.ledger = CostLedger(tmp_path / "cost_log.csv")
+    usage = build_usage("openai", "gpt-5.4-mini", input_tokens=900, output_text_tokens=300)
+    describe.last_usage = usage
+    describe.describe.side_effect = ValueError("Description still has style problems: glossy")
+    summary = runner.run(Options())
+    attempt = next(iter(repo.attempts.values()))
+    assert attempt.stage == Stage.FAILED and attempt.text_usage == usage  # saved on the failed attempt
+    assert summary.results[0].status == "failed" and summary.results[0].tokens == 1200
+    assert summary.cost_usd == pytest.approx(usage["cost_usd"]) and (tmp_path / "cost_log.csv").exists()
+    generate.generate.assert_not_called()
+
+
+def test_description_version_is_saved_with_the_description(tmp_path):
+    from forkplan_images.descriptions import DESCRIPTION_VERSION
+    runner, repo, *_ = setup(tmp_path)
+    runner.run(Options())
+    assert next(iter(repo.attempts.values())).description_version == DESCRIPTION_VERSION
+
+
+def test_usage_records_the_rates_used_for_the_estimate():
+    usage = build_usage("openai", "gpt-5.4-mini", input_tokens=1, output_text_tokens=1)
+    assert usage["rates"] == {"input": 0.75, "output_text": 4.5}
+    assert build_usage("openai", "unknown-model")["rates"] is None

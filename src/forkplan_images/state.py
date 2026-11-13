@@ -56,6 +56,7 @@ class Attempt:
     description: str | None = None
     final_prompt: str | None = None
     prompt_version: str | None = None
+    description_version: str | None = None
     settings: dict[str, Any] = field(default_factory=dict)
     text_usage: dict[str, Any] | None = None
     image_usage: dict[str, Any] | None = None

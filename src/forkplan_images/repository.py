@@ -26,7 +26,7 @@ class Repository(Protocol):
 
 
 MUTABLE_ATTEMPT_FIELDS = {
-    "stage", "last_successful_stage", "description", "final_prompt", "prompt_version",
+    "stage", "last_successful_stage", "description", "description_version", "final_prompt", "prompt_version",
     "settings", "text_usage", "image_usage", "original_key", "jpeg_key", "jpeg_sha256", "jpeg_length", "image_key",
     "error_type", "error_message",
 }
@@ -72,30 +72,33 @@ class PostgresRepository:
 
     def candidates(self, limit: int, ids: tuple[UUID, ...] = (), include_failed: bool = False) -> list[Work]:
         stages = [s.value for s in ACTIVE_STAGES] + ([Stage.FAILED.value] if include_failed else [])
+        # The id filter is only added when ids are given: an empty IN list has no type and Postgres rejects uuid = integer.
+        attempt_filter, recipe_filter = ("AND resource_id IN :ids", "AND r.id IN :ids") if ids else ("", "")
+        id_binding = [bindparam("ids", expanding=True)] if ids else []
         with self.engine.connect() as conn:
-            attempts = conn.execute(text("""
+            attempts = conn.execute(text(f"""
                 SELECT * FROM catalog_image_generations
                 WHERE resource_type = 'recipe' AND stage IN :stages
                   AND (lease_expires_at IS NULL OR lease_expires_at <= now())
-                  AND (:all_ids OR resource_id IN :ids)
+                  {attempt_filter}
                 ORDER BY created_at, id LIMIT :limit
-            """).bindparams(bindparam("stages", expanding=True), bindparam("ids", expanding=True)),
-                {"stages": stages, "ids": ids, "all_ids": not ids, "limit": limit}).mappings()
+            """).bindparams(bindparam("stages", expanding=True), *id_binding),
+                {"stages": stages, "limit": limit, **({"ids": ids} if ids else {})}).mappings()
             work = [Work(self._recipe(conn, row["resource_id"]), attempt_from_row(row)) for row in attempts]
             remaining = limit - len(work)
             if remaining:
-                rows = conn.execute(text("""
+                rows = conn.execute(text(f"""
                     SELECT r.id FROM catalog_recipes r
                     WHERE (r.image_key IS NULL OR r.image_key = '')
                       AND r.status IN ('PUBLISHED', 'DRAFT')
-                      AND (:all_ids OR r.id IN :ids)
+                      {recipe_filter}
                       AND NOT EXISTS (
                         SELECT 1 FROM catalog_image_generations g
                         WHERE g.resource_type = 'recipe' AND g.resource_id = r.id
                           AND g.stage <> 'retired')
                     ORDER BY r.id LIMIT :limit
-                """).bindparams(bindparam("ids", expanding=True)),
-                    {"ids": ids, "all_ids": not ids, "limit": remaining}).mappings()
+                """).bindparams(*id_binding),
+                    {"limit": remaining, **({"ids": ids} if ids else {})}).mappings()
                 work.extend(Work(self._recipe(conn, row["id"])) for row in rows)
             return work
 

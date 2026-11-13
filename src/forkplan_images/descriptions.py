@@ -213,9 +213,11 @@ class BatchedDescriber:
 
     def describe(self, recipe: Recipe, *, checkpoint: Checkpoint | None = None) -> str:
         ready = self._ready.pop(str(recipe.id), None)
+        self.last_usage = None  # never leave a previous recipe's usage behind
         if ready is None:
-            description = self.inner.describe(recipe, checkpoint=checkpoint)
-            self.last_usage = self.inner.last_usage
-            return description
+            try:
+                return self.inner.describe(recipe, checkpoint=checkpoint)
+            finally:
+                self.last_usage = self.inner.last_usage  # includes calls billed before a failure
         description, self.last_usage = ready
         return description

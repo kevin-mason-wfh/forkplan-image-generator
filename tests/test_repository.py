@@ -90,3 +90,17 @@ def test_postgres_lease_mutation_fenced_after_lock(method):
     assert "FOR UPDATE" in str(calls[0].args[0])
     assert "lease_token = :token" in str(calls[1].args[0])
     assert "clock_timestamp()" in str(calls[1].args[0])
+
+
+@pytest.mark.parametrize("ids", [(), (uuid4(),)])
+def test_candidate_queries_only_filter_by_id_when_ids_are_given(ids):
+    """An empty IN list is untyped and fails on Postgres (uuid = integer); found by running against a real database."""
+    statements = []
+    conn = MagicMock()
+    conn.execute.side_effect = lambda statement, params=None: (
+        statements.append(str(statement)), MagicMock(mappings=lambda: []))[1]
+    engine = MagicMock()
+    engine.connect.return_value.__enter__.return_value = conn
+    PostgresRepository(engine).candidates(5, ids)
+    assert len(statements) == 2 and all(("POSTCOMPILE_ids" in s) == bool(ids) for s in statements)
+    assert all("all_ids" not in s for s in statements)

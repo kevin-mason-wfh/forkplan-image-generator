@@ -4,7 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from .descriptions import Describer, validate_description
+from .descriptions import DESCRIPTION_VERSION, Describer, validate_description
 from .generation import GenerationError, Generator
 from .heartbeat import Heartbeat
 from .imaging import fingerprint, process, verify
@@ -87,11 +87,13 @@ class AttemptRunner:
         if self.attempt.stage != Stage.SELECTED:
             return
         services = self.services
-        description = self.heartbeat.call(lambda: services.describer.describe(
-            self.work.recipe, checkpoint=self.heartbeat.fence))
-        usage_columns = self._capture_usage("text", services.describer)
+        try:
+            description = self.heartbeat.call(lambda: services.describer.describe(
+                self.work.recipe, checkpoint=self.heartbeat.fence))
+        finally:
+            usage_columns = self._capture_usage("text", services.describer)  # billed even if the text is rejected
         self._advance(Stage.DESCRIBED, description=validate_description(description),
-                      settings=services.settings, **usage_columns)
+                      description_version=DESCRIPTION_VERSION, settings=services.settings, **usage_columns)
 
     def _build_prompt(self) -> None:
         if self.attempt.stage != Stage.DESCRIBED:
@@ -172,6 +174,9 @@ class AttemptRunner:
                 uncertain = True
         status = Stage.UNCERTAIN if uncertain else Stage.FAILED
         detail = redact(str(exc), self.services.secrets)
+        for kind, usage in self.usage.items():  # calls billed this run that no stage write has saved yet
+            if not getattr(self.attempt, f"{kind}_usage"):
+                changes[f"{kind}_usage"] = usage
         self._update(stage=status, error_type=type(exc).__name__, error_message=detail, **changes)
         log.warning("attempt %s %s: %s", self.attempt.id, status, detail)
         return Outcome(str(status), detail)

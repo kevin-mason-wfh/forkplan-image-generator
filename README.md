@@ -47,8 +47,10 @@ If you customize `ARTIFACT_DIR` inside this checkout, also add it to `.gitignore
 
 Ask your database administrator to review and explicitly apply, in order,
 `migrations/001_catalog_image_generations.sql` and
-`migrations/002_generation_usage.sql` (token usage and cost columns), and optionally
-`migrations/003_generation_costs_view.sql` (per-attempt tokens and cost view), using a
+`migrations/002_generation_usage.sql` (token usage and cost columns),
+`migrations/003_generation_costs_view.sql` (per-attempt tokens and cost view) and
+`migrations/004_attempt_integrity.sql` (description version, integrity checks, an index and the final view; **required** by
+the current code, which writes `description_version`), using a
 migration role, before running the CLI. The runtime role needs SELECT on the three catalog tables and
 SELECT/INSERT/UPDATE on the tracking table, **not** catalog write permissions.
 The external presign API, not this CLI, sets the recipe's `image_key`.
@@ -268,6 +270,14 @@ pytest
 ruff check src tests   # needs the dev extra
 ```
 
+Postgres integration tests (`tests/integration/`) are skipped unless `TEST_DATABASE_URL` points at a throwaway database. They create a
+temporary schema, apply every migration to it and exercise the real SQL (claims, lease expiry, retry, redo, constraints, the cost view):
+
+```sh
+docker run -d --name fp-pg -e POSTGRES_PASSWORD=testpass -e POSTGRES_DB=catalog -p 55432:5432 postgres:16-alpine
+TEST_DATABASE_URL=postgresql+psycopg://postgres:testpass@localhost:55432/catalog pytest tests/integration
+```
+
 Tests mock OpenAI/HTTP and use a repository fake, **not SQLite**. A suite-wide
 socket guard rejects real network/database connections. Real SDK parsing and
 request serialization are exercised with mocked HTTP. No live image call or
@@ -286,7 +296,8 @@ database is needed.
 * Presign success is assumed to return the documented fields, HTTPS upload URL
   and JPEG content type. A lost presign response may change the recipe key; the
   next presign safely replaces it. Public URLs are not persisted.
-* **Real Postgres:** verify migration compatibility, the partial unique index,
+* **Real Postgres:** the integration tests above verify the migrations and repository SQL on Postgres 16 (found and fixed an empty `--ids`
+  query bug). Still verify in your environment: migration compatibility, the partial unique index,
   advisory locking under competing claims/redo, transaction commits before
   generation, and single-statement token/expiry fencing (including a row-lock
   wait crossing lease expiry). The mocked SQL tests cannot prove these guarantees.

@@ -1,49 +1,107 @@
--- Apply explicitly, never from the application. Catalog tables remain read-only.
+-- Image generation tracking for the forkplan-images CLI. Apply once, explicitly (never from the application), with a role
+-- that can create tables and views. Catalog tables are only read by the application; this is the only table it writes.
+-- Rollback: DROP VIEW catalog_image_generation_costs; DROP TABLE catalog_image_generations;
+--
+-- One row per generation attempt. An attempt moves forward through `stage`; `last_successful_stage` survives errors so a
+-- failed attempt can resume. Attempts are leased (lease_* columns) so only one worker advances an attempt at a time.
 BEGIN;
+
 CREATE TABLE catalog_image_generations (
-    id uuid PRIMARY KEY,
-    resource_id uuid NOT NULL,
-    resource_type text NOT NULL CHECK (resource_type IN ('recipe', 'ingredient')),
-    attempt_number integer NOT NULL CHECK (attempt_number > 0),
-    description text,
-    final_prompt text,
-    prompt_version text,
-    settings jsonb NOT NULL DEFAULT '{}',
-    stage text NOT NULL CHECK (stage IN (
+    id                    uuid PRIMARY KEY,
+    resource_id           uuid        NOT NULL,                 -- catalog row id (no FK: catalog tables are owned elsewhere)
+    resource_type         text        NOT NULL,
+    attempt_number        integer     NOT NULL,
+    stage                 text        NOT NULL,
+    last_successful_stage text        NOT NULL,
+
+    -- What was asked for
+    description           text,                                  -- text-model description of the finished dish
+    description_version   text,                                  -- version of the description instructions that wrote it
+    final_prompt          text,                                  -- exact prompt sent to the image model
+    prompt_version        text,                                  -- version of the image prompt template
+    settings              jsonb       NOT NULL DEFAULT '{}',     -- models, quality, size, provider
+
+    -- What it cost (tokens are authoritative provider counts; cost_usd is an estimate, null when no rate is known)
+    text_usage            jsonb,                                 -- description call(s), incl. repairs and batch share
+    image_usage           jsonb,                                 -- image call
+
+    -- Artifacts (relative storage keys, never URLs)
+    original_key          text,
+    jpeg_key              text,
+    jpeg_sha256           text,
+    jpeg_length           bigint,
+    image_key             text,                                  -- key returned by the presign API for the uploaded image
+
+    -- Failure and history
+    error_type            text,
+    error_message         text,                                  -- redacted before it is written
+    retry_count           integer     NOT NULL DEFAULT 0,
+    superseded_by         uuid REFERENCES catalog_image_generations(id) DEFERRABLE INITIALLY DEFERRED,
+    redo_note             text,
+
+    created_at            timestamptz NOT NULL DEFAULT now(),
+    updated_at            timestamptz NOT NULL DEFAULT now(),
+    completed_at          timestamptz,
+
+    -- Lease: all three are set together when claimed, cleared together when released or retired
+    lease_owner           text,
+    lease_token           uuid,
+    lease_expires_at      timestamptz,
+
+    CONSTRAINT catalog_image_generations_attempt_unique UNIQUE (resource_type, resource_id, attempt_number),
+    CONSTRAINT catalog_image_generations_resource_type_check CHECK (resource_type IN ('recipe', 'ingredient')),  -- 'ingredient' reserved
+    CONSTRAINT catalog_image_generations_attempt_number_check CHECK (attempt_number > 0),
+    CONSTRAINT catalog_image_generations_stage_check CHECK (stage IN (
         'selected', 'described', 'prompt_built', 'generating', 'generated',
         'processed', 'presigned', 'uploaded', 'completed', 'failed',
-        'generation_uncertain', 'retired'
-    )),
-    last_successful_stage text NOT NULL CHECK (last_successful_stage IN (
+        'generation_uncertain', 'retired')),
+    CONSTRAINT catalog_image_generations_last_stage_check CHECK (last_successful_stage IN (
         'selected', 'described', 'prompt_built', 'generated', 'processed',
-        'presigned', 'uploaded', 'completed'
-    )),
-    original_key text,
-    jpeg_key text,
-    jpeg_sha256 text,
-    jpeg_length bigint CHECK (jpeg_length > 0 AND jpeg_length < 4900000),
-    image_key text,
-    error_type text,
-    error_message text,
-    retry_count integer NOT NULL DEFAULT 0,
-    superseded_by uuid REFERENCES catalog_image_generations(id) DEFERRABLE INITIALLY DEFERRED,
-    redo_note text,
-    created_at timestamptz NOT NULL DEFAULT now(),
-    updated_at timestamptz NOT NULL DEFAULT now(),
-    completed_at timestamptz,
-    lease_owner text,
-    lease_token uuid,
-    lease_expires_at timestamptz,
-    UNIQUE (resource_type, resource_id, attempt_number),
-    CHECK ((stage = 'retired') = (superseded_by IS NOT NULL)),
-    CHECK (stage NOT IN ('uploaded', 'completed') OR image_key IS NOT NULL)
+        'presigned', 'uploaded', 'completed')),
+    CONSTRAINT catalog_image_generations_jpeg_length_check CHECK (jpeg_length > 0 AND jpeg_length < 4900000),
+    CONSTRAINT catalog_image_generations_retired_check CHECK ((stage = 'retired') = (superseded_by IS NOT NULL)),
+    CONSTRAINT catalog_image_generations_image_key_check CHECK (stage NOT IN ('uploaded', 'completed') OR image_key IS NOT NULL),
+    CONSTRAINT catalog_image_generations_lease_consistent CHECK (
+        (lease_owner IS NULL) = (lease_token IS NULL) AND (lease_token IS NULL) = (lease_expires_at IS NULL)),
+    CONSTRAINT catalog_image_generations_usage_is_object CHECK (
+        (text_usage IS NULL OR jsonb_typeof(text_usage) = 'object')
+        AND (image_usage IS NULL OR jsonb_typeof(image_usage) = 'object'))
 );
+
+-- At most one in-flight attempt per resource. (Lookups by resource and attempt number use the UNIQUE constraint's index.)
 CREATE UNIQUE INDEX catalog_image_generations_one_active
-ON catalog_image_generations (resource_type, resource_id)
-WHERE stage IN (
-    'selected', 'described', 'prompt_built', 'generating',
-    'generated', 'processed', 'presigned', 'uploaded'
-);
-CREATE INDEX catalog_image_generations_resource
-ON catalog_image_generations (resource_type, resource_id, attempt_number DESC);
+    ON catalog_image_generations (resource_type, resource_id)
+    WHERE stage IN ('selected', 'described', 'prompt_built', 'generating', 'generated', 'processed', 'presigned', 'uploaded');
+
+-- The candidate scan: open or failed attempts, oldest first.
+CREATE INDEX catalog_image_generations_open_by_age
+    ON catalog_image_generations (created_at, id)
+    WHERE stage IN ('selected', 'described', 'prompt_built', 'generating', 'generated', 'processed', 'presigned', 'uploaded', 'failed');
+
+COMMENT ON COLUMN catalog_image_generations.text_usage IS
+    'Description call(s): {provider, model, input_tokens, output_text_tokens, output_image_tokens, reasoning_tokens (already inside output_text_tokens), rates (per 1M tokens, snapshot), cost_usd|null}';
+COMMENT ON COLUMN catalog_image_generations.image_usage IS
+    'Image call, same shape. cost_usd is an estimate from the rates snapshot; tokens are authoritative.';
+
+-- Tokens and estimated cost per attempt, for reporting. Example:
+--   SELECT date_trunc('day', completed_at) AS day, count(*), sum(total_tokens), sum(total_cost_usd)
+--   FROM catalog_image_generation_costs WHERE stage = 'completed' GROUP BY 1 ORDER BY 1;
+CREATE VIEW catalog_image_generation_costs AS
+SELECT
+    id AS attempt_id, resource_id, attempt_number, stage, description_version, prompt_version, created_at, completed_at,
+    text_usage->>'model'  AS text_model,
+    COALESCE((text_usage->>'input_tokens')::bigint, 0)        AS text_input_tokens,
+    COALESCE((text_usage->>'output_text_tokens')::bigint, 0)  AS text_output_tokens,
+    COALESCE((text_usage->>'reasoning_tokens')::bigint, 0)    AS text_reasoning_tokens,
+    image_usage->>'model' AS image_model,
+    COALESCE((image_usage->>'input_tokens')::bigint, 0)         AS image_input_tokens,
+    COALESCE((image_usage->>'output_image_tokens')::bigint, 0)  AS image_output_tokens,
+    COALESCE((text_usage->>'input_tokens')::bigint, 0) + COALESCE((text_usage->>'output_text_tokens')::bigint, 0)
+      + COALESCE((image_usage->>'input_tokens')::bigint, 0) + COALESCE((image_usage->>'output_text_tokens')::bigint, 0)
+      + COALESCE((image_usage->>'output_image_tokens')::bigint, 0)  AS total_tokens,
+    (text_usage->>'cost_usd')::numeric  AS text_cost_usd,
+    (image_usage->>'cost_usd')::numeric AS image_cost_usd,
+    COALESCE((text_usage->>'cost_usd')::numeric, 0) + COALESCE((image_usage->>'cost_usd')::numeric, 0) AS total_cost_usd
+FROM catalog_image_generations;
+
 COMMIT;

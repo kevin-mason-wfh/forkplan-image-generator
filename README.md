@@ -45,14 +45,11 @@ with local permissions; artifact storage is private and is not a public web root
 If you customize `ARTIFACT_DIR` inside this checkout, also add it to `.gitignore`.
 `python-dotenv` loads `.env`; already-exported variables take precedence.
 
-Ask your database administrator to review and explicitly apply, in order,
-`migrations/001_catalog_image_generations.sql` and
-`migrations/002_generation_usage.sql` (token usage and cost columns),
-`migrations/003_generation_costs_view.sql` (per-attempt tokens and cost view) and
-`migrations/004_attempt_integrity.sql` (description version, integrity checks, an index and the final view; **required** by
-the current code, which writes `description_version`), using a
-migration role, before running the CLI. The runtime role needs SELECT on the three catalog tables and
-SELECT/INSERT/UPDATE on the tracking table, **not** catalog write permissions.
+Ask your database administrator to review and explicitly apply `migrations/001_catalog_image_generations.sql` once, using a
+migration role, before running the CLI. It is a single migration: the tracking table (with its constraints and indexes) and the
+`catalog_image_generation_costs` reporting view. It is not safe to re-run; the rollback is in the file's header. The runtime role
+needs SELECT on the three catalog tables and SELECT/INSERT/UPDATE on the tracking table, **not** catalog write permissions
+(plus SELECT on the view if it will run cost reports).
 The external presign API, not this CLI, sets the recipe's `image_key`.
 
 ### Configuration
@@ -159,7 +156,7 @@ Every description and image call records the provider's token counts and an esti
   call (dry runs too, because their text calls cost money). Columns: text and image model, input / output / reasoning tokens, per-call
   cost, `text_total_tokens`, `image_total_tokens`, `total_tokens`, `total_cost_usd`, prompt version and status. A ledger written by an older
   version is upgraded in place (old rows keep blanks in the new columns). A full disk or unwritable path never fails or retries a generation.
-* **Database,** per attempt, in `text_usage` / `image_usage` (jsonb; migration 002). Migration 003 adds a read-only view,
+* **Database,** per attempt, in `text_usage` / `image_usage` (jsonb), and a read-only view,
   `catalog_image_generation_costs`, with one row per attempt: token counts by call, `total_tokens`, `text_cost_usd`, `image_cost_usd`
   and `total_cost_usd`. Example: `SELECT sum(total_tokens), sum(total_cost_usd) FROM catalog_image_generation_costs;`
 

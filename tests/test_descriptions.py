@@ -202,3 +202,11 @@ def test_length_limits_are_enforced_with_one_repair():
 def test_added_mood_words_are_flagged():
     from forkplan_images.descriptions import style_problems
     assert style_problems(plain("A rich, hearty and rustic stew, steaming and fresh.")) == ["fresh", "hearty", "rich", "rustic", "steaming"]
+
+
+def test_words_from_the_recipes_own_ingredient_names_are_not_flagged():
+    from forkplan_images.descriptions import own_words, style_problems
+    recipe = Recipe(uuid4(), "Margherita Pizza", ingredients=({"name": "Fresh Basil"}, {"name": "Mozzarella"}))
+    text = plain("A round pizza topped with fresh basil leaves and rich, hearty cheese.")
+    assert style_problems(text) == ["fresh", "hearty", "rich"]
+    assert style_problems(text, own_words(recipe)) == ["hearty", "rich"]

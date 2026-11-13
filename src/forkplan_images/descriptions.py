@@ -56,9 +56,18 @@ MIN_DESCRIPTION_CHARS = 200
 MAX_DESCRIPTION_CHARS = 700
 
 
-def style_problems(description: str) -> list[str]:
-    """Everything wrong with a description that the model should fix: banned words, then length."""
-    problems = sorted({m.group(0).lower() for m in STYLE_BLOCKLIST.finditer(description)})
+def own_words(recipe: Recipe) -> frozenset[str]:
+    """Words from the recipe's own name and ingredient names ("Fresh Basil"): naming them is not marketing."""
+    names = [recipe.name, *(str(i.get("name", "")) for i in recipe.ingredients)]
+    return frozenset(re.findall(r"[a-z]+", " ".join(names).lower()))
+
+
+def style_problems(description: str, allowed: frozenset[str] = frozenset()) -> list[str]:
+    """Everything wrong with a description that the model should fix: banned words, then length.
+
+    `allowed` holds words the recipe itself uses, which are never reported."""
+    found = {m.group(0).lower() for m in STYLE_BLOCKLIST.finditer(description)}
+    problems = sorted(found - allowed)
     if len(description) > MAX_DESCRIPTION_CHARS:
         problems.append(f"over {MAX_DESCRIPTION_CHARS} characters (shorten it)")
     elif len(description) < MIN_DESCRIPTION_CHARS:
@@ -137,11 +146,11 @@ class OpenAIDescriber:
     def describe(self, recipe: Recipe, *, checkpoint: Checkpoint | None = None) -> str:
         self.last_usage = None
         description = self._call(recipe, checkpoint)
-        problems = style_problems(description)
+        problems = style_problems(description, own_words(recipe))
         if problems:
             # One bounded repair pass; both calls are counted in last_usage. Still-bad text fails the recipe.
             description = self._call(recipe, checkpoint, previous=description, problems=problems)
-            problems = style_problems(description)
+            problems = style_problems(description, own_words(recipe))
             if problems:
                 raise ValueError("Description still has style problems: " + ", ".join(problems))
         return description
@@ -153,7 +162,8 @@ class OpenAIDescriber:
         parsed = self._request(f"{INSTRUCTIONS}\n\n{BATCH_SUFFIX}",
                                "\n".join(_recipe_block(r) for r in recipes),
                                BatchDescriptions, checkpoint)
-        wanted = {str(r.id) for r in recipes}
+        by_id = {str(r.id): r for r in recipes}
+        wanted = set(by_id)
         found: dict[str, str] = {}
         for item in parsed.items:
             if item.id not in wanted or item.id in found:
@@ -162,7 +172,7 @@ class OpenAIDescriber:
                 text = validate_description(item.description)
             except ValueError:
                 continue
-            if not style_problems(text):
+            if not style_problems(text, own_words(by_id[item.id])):
                 found[item.id] = text
         return found
 

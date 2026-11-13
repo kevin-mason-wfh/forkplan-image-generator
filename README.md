@@ -112,6 +112,12 @@ other recipes. Runtime connection failures return 1 without exposing driver
 exception details. SDK/HTTP request logging is suppressed by the CLI; error
 details are redacted before database persistence and output.
 
+## Recommended models
+
+After side-by-side runs (`prompt_experiments/`, gitignored): `OPENAI_IMAGE_MODEL=gpt-image-2.6-flare` (about $0.046 per
+medium image, about 10 s) and `OPENAI_TEXT_MODEL=gpt-5.4-mini` (about $0.001 per description). Rates are estimates; confirm
+on the OpenAI pricing page. gpt-5.4-mini sometimes describes a curry's chicken as one whole piece, so spot-check curries.
+
 ## Batched descriptions (fewer text requests)
 
 `--batch-descriptions` asks the text model for up to 10 recipes' descriptions in one request instead of one request per

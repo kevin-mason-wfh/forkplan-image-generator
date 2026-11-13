@@ -221,5 +221,7 @@ __marimo__/
 
 # Private generated food images and local configuration
 artifacts/
+local_images/
+prompt_experiments/
 .env.*
 !.env.example

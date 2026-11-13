@@ -4,6 +4,29 @@ Python 3.11+ MVP for generating missing recipe photographs and uploading them
 through the catalog presign API. Catalog tables are **read-only** to this program;
 only `catalog_image_generations` is written. No migration is run automatically.
 
+How a recipe flows: the OpenAI text model writes a plain factual description, a fixed
+catalogue prompt is built from it, an image model (OpenAI `gpt-image-*` or Gemini) renders
+it, the result is converted to a JPEG under 4.9 MB, and it is uploaded through the presign
+API. Each step is saved, so a crashed or interrupted run resumes without paying twice.
+
+## Module map
+
+| Module | Responsibility |
+| --- | --- |
+| `cli.py` | Argument parsing, wiring of real clients, printing the run summary |
+| `config.py` | Environment validation into an immutable `Config` |
+| `orchestrator.py` | Selects work, enforces the caps, claims attempts, and totals results and cost |
+| `attempt_runner.py` | Runs one claimed attempt: one small method per stage, plus failure recording |
+| `heartbeat.py` | Renews the lease while slow calls run and detects lost ownership |
+| `repository.py`, `state.py` | Postgres persistence, leases and fencing; `Stage`, `Attempt`, `Recipe` |
+| `descriptions.py` | Text-model descriptions: single, batched (`BatchedDescriber`) and style checks |
+| `prompts.py`, `prompt_templates/` | The image prompt builder; prompt wording lives in plain `.txt` files here |
+| `generation.py` | `OpenAIGenerator` and `GeminiGenerator`; definite vs uncertain failures |
+| `imaging.py`, `storage.py` | JPEG processing and integrity checks; no-clobber local storage |
+| `uploads.py`, `network.py` | Presign and PUT client; bounded retries, timeouts, HTTPS rules |
+| `pricing.py` | Token usage, cost estimates (`RATES`) and the CSV cost ledger |
+| `redaction.py` | Strips secrets and URLs from anything persisted or printed |
+
 ## macOS setup
 
 Install Python 3.11 or newer, then from the repository root:
@@ -11,7 +34,7 @@ Install Python 3.11 or newer, then from the repository root:
 ```sh
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install -e '.[test]'
+python -m pip install -e '.[test,dev]'   # dev adds ruff for linting
 cp .env.example .env
 ```
 
@@ -22,9 +45,10 @@ with local permissions; artifact storage is private and is not a public web root
 If you customize `ARTIFACT_DIR` inside this checkout, also add it to `.gitignore`.
 `python-dotenv` loads `.env`; already-exported variables take precedence.
 
-Ask your database administrator to review and explicitly apply
-`migrations/001_catalog_image_generations.sql`, using a migration role, before
-running the CLI. The runtime role needs SELECT on the three catalog tables and
+Ask your database administrator to review and explicitly apply, in order,
+`migrations/001_catalog_image_generations.sql` and
+`migrations/002_generation_usage.sql` (token usage and cost columns), using a
+migration role, before running the CLI. The runtime role needs SELECT on the three catalog tables and
 SELECT/INSERT/UPDATE on the tracking table, **not** catalog write permissions.
 The external presign API, not this CLI, sets the recipe's `image_key`.
 
@@ -36,10 +60,14 @@ All variables are documented with placeholders in `.env.example`.
 | --- | --- |
 | `DATABASE_URL`, `API_BASE_URL`, `API_TOKEN`, `OPENAI_API_KEY` | Required |
 | `OPENAI_TEXT_MODEL` | Required; `gpt-4o-2024-08-06` |
-| `OPENAI_IMAGE_MODEL` | Required; `gpt-image-1`, `gpt-image-1-mini`, `gpt-image-1.5` |
-| `OPENAI_IMAGE_QUALITY` | `low`, `medium`, `high`, `auto`; default `medium` |
-| `OPENAI_IMAGE_SIZE` | Square `1024x1024` only |
+| `OPENAI_IMAGE_MODEL` | Required when `IMAGE_PROVIDER=openai`; any `gpt-image-*` ID (e.g. `gpt-image-1.5`); `gpt-image-1` is closed upstream |
+| `OPENAI_IMAGE_QUALITY` | OpenAI images only: `low`, `medium`, `high`, `auto`; default `medium` |
+| `OPENAI_IMAGE_SIZE` | OpenAI images only: square `1024x1024` only |
 | `ARTIFACT_DIR` | Default `artifacts`; store private, durable artifacts here |
+| `LOCAL_IMAGE_DIR` | Optional; also saves `<recipe-name>-<id>-a<attempt>.jpg` copies of verified final JPEGs (no-clobber) |
+| `IMAGE_PROVIDER` | Optional; `openai` (default) or `gemini`. Text descriptions always use OpenAI |
+| `GEMINI_API_KEY`, `GEMINI_IMAGE_MODEL` | Required when `IMAGE_PROVIDER=gemini`; model must look like `gemini-*image*` (e.g. `gemini-3.1-flash-image`) |
+| `COST_LOG_PATH` | Optional; default `<ARTIFACT_DIR>/cost_log.csv` (local cost ledger) |
 | `LEASE_SECONDS` | Default 300; must exceed the 180-second generation timeout |
 
 Model names have **no defaults**. The explicit allow-lists are deliberately
@@ -56,6 +84,7 @@ forkplan-images --dry-run --limit 3
 forkplan-images --limit 1 --max-images 1
 forkplan-images --ids RECIPE_UUID OTHER_RECIPE_UUID --max-images 2
 forkplan-images --retry-failures --limit 5 --max-images 1
+forkplan-images --limit 10 --max-images 10 --batch-descriptions   # fewer text requests
 forkplan-images --redo RECIPE_UUID --note "Reviewed description; approved a new attempt"
 # Equivalent entry point:
 python -m forkplan_images --help
@@ -82,6 +111,54 @@ refused redo, **2** usage/configuration error. A failed recipe does not stop
 other recipes. Runtime connection failures return 1 without exposing driver
 exception details. SDK/HTTP request logging is suppressed by the CLI; error
 details are redacted before database persistence and output.
+
+## Batched descriptions (fewer text requests)
+
+`--batch-descriptions` asks the text model for up to 10 recipes' descriptions in one request instead of one request per
+recipe, which helps on low text-model request limits. Only the recipes this run can actually generate (up to
+`--max-images`) are described. Each description is saved under `ARTIFACT_DIR/descriptions/` as soon as the batch returns,
+so rerunning never repeats a paid request. A recipe the batch missed or that used marketing wording is described by a
+normal single request. The batch's cost is split evenly across its recipes in the ledger.
+
+## Prompt text and versions
+
+The wording of the image style, description instructions and batch suffix is in
+`src/forkplan_images/prompt_templates/*.txt` (hand-wrapped lines are joined on load). Stored attempts and cached
+descriptions are keyed by `PROMPT_VERSION` / `DESCRIPTION_VERSION`, so a wording change must come with a version bump.
+`tests/test_prompt_versions.py` pins a hash of each text to its version and fails until you bump the version and update
+the hash.
+
+Description rules live in the instructions *and* are enforced in code: `STYLE_BLOCKLIST` rejects marketing, taste and
+mood words (perfect, glossy, vibrant, tender, savory, comforting, appealing, rich, fresh, and similar) and descriptions outside
+200-700 characters. A rejected description gets one
+repair call that sends the previous text back to be edited; if it still contains a banned word the recipe fails (re-run
+with `--retry-failures`). Recipes are sent to the text model as `<recipe>` blocks, and the image prompt opens with the
+dish name so the image model uses its own knowledge of how the dish is served.
+
+## Logging
+
+`-v` / `--verbose` prints progress to stderr: claims, skips, stage changes, failures and lease problems. The default shows
+warnings and errors only. Messages carry IDs and redacted error text, never prompts, URLs or credentials. SDK and HTTP
+library logging stays silenced because it can expose URLs.
+
+## Cost tracking
+
+Every billable call is also appended to a local CSV ledger, `cost_log.csv` in `ARTIFACT_DIR` (override with
+`COST_LOG_PATH`): one row per recipe per run with model, token counts, per-call and total estimated cost, prompt version
+and status. Dry runs are logged too, because their text calls cost money. The ledger needs no database migration, and a
+full disk or unwritable path never fails or retries a generation. Total spend: sum `total_cost_usd`.
+
+Every description and image call also records the token usage the provider returns, plus an estimated
+`cost_usd`, in `text_usage` / `image_usage` (jsonb) on the tracking row (needs migration 002). The CLI prints the
+estimated cost per recipe and per run.
+
+* **Tokens are authoritative; dollars are estimates** from `src/forkplan_images/pricing.py`. Confirm the rates
+  on the provider pricing pages and edit `RATES` when they change. A model with no known rate, or an
+  unpriced token class, records `cost_usd: null` and is counted as "unpriced" in the run total.
+* Gemini image models return ~1,120 image-output tokens per 1K image, plus a few hundred text/reasoning tokens.
+* A call that fails before a usable response (timeouts, 4xx/5xx, blocked prompts) has no usage to record;
+  an uncertain attempt may still have been billed. Check the provider dashboard for those.
+* Total per attempt: `COALESCE((text_usage->>'cost_usd')::numeric,0) + COALESCE((image_usage->>'cost_usd')::numeric,0)`.
 
 ## State, recovery and concurrency
 
@@ -141,10 +218,17 @@ Resume comes from tracking state, not the recipe's possibly premature image key.
   PUT and the `uploaded` write causes a new presign/PUT using the saved JPEG,
   with the newer key recorded. Upload failures never regenerate an image.
 
-Text calls, downloads, presign and PUT use at most three attempts with exponential
-backoff and jitter. Lease checkpoints fence each retry, so losing ownership cannot
+Text calls (except HTTP 429), downloads, presign and PUT use at most three attempts with
+exponential backoff and jitter. A text-model 429 is not retried: an immediate retry is also
+rate limited and spends more of the quota. Re-run with `--retry-failures` instead. Lease checkpoints fence each retry, so losing ownership cannot
 dispatch another request. Each network call has a timeout.
 Database connect/statement/lock timeouts are bounded too.
+
+## Repository extras
+
+* `data/world-cuisines-menu.csv` is a 40-dish sample menu (Indian, Japanese, Korean, Italian) with my own estimated
+  macros. The CLI does **not** read it: it only reads recipes from the catalog database.
+* `local_images/` and `prompt_experiments/` hold local output and prompt experiments; both are gitignored.
 
 ## Small manual pilot (explicitly paid, outside the tests)
 
@@ -154,8 +238,9 @@ Database connect/statement/lock timeouts are bounded too.
 2. Run `--limit 1 --max-images 1`. Inspect the tracking row's description and
    local image, then verify the public image through your catalog application.
 3. Check ingredient accuracy **by eye**, in both the description and photo:
-   no invented sides/toppings/garnishes; portions fit the quantities; consistent
-   overhead photography, neutral ceramic tableware, white wood and soft light.
+   no invented sides/toppings/garnishes; portions fit the quantities; a
+   consistent 45-degree three-quarter angle, a single neutral ceramic plate, white wood and soft light,
+   and no cutlery, cups, napkins or condiments in frame.
 4. If acceptable, run `--limit 5 --max-images 5` and repeat the checks. Use
    `--redo ID --note ...` only after reviewing uncertain billing or completed
    results. Never mass-retry uncertain attempts.
@@ -168,12 +253,13 @@ prompt and checked in this pilot, not by requiring visible ingredient names.
 
 ```sh
 pytest
+ruff check src tests   # needs the dev extra
 ```
 
 Tests mock OpenAI/HTTP and use a repository fake, **not SQLite**. A suite-wide
 socket guard rejects real network/database connections. Real SDK parsing and
 request serialization are exercised with mocked HTTP. No live image call or
-database is needed. No pre-existing lint/build tools were present.
+database is needed.
 
 ### Assumptions and remaining integration checks
 
@@ -196,6 +282,8 @@ database is needed. No pre-existing lint/build tools were present.
 * **API/S3:** verify auth/scopes, presign response/recipe side effects, content
   length/type, expiry, exact-byte PUTs, lack of bearer auth on S3, repeated PUTs,
   newer presign keys after interruption, and public catalog visibility.
+* **Gemini:** the request shape, usage fields and the flash/pro/lite rates in `pricing.py` are not verified
+  against official documentation (pro and lite rates are third-party figures); confirm before relying on cost totals.
 * **OpenAI:** parameters below were checked in official SDK documentation/types;
   account access, model availability, actual latency/billing, text/image quality
   and ingredient fidelity remain live pilot checks. No paid verification was

@@ -47,7 +47,8 @@ If you customize `ARTIFACT_DIR` inside this checkout, also add it to `.gitignore
 
 Ask your database administrator to review and explicitly apply, in order,
 `migrations/001_catalog_image_generations.sql` and
-`migrations/002_generation_usage.sql` (token usage and cost columns), using a
+`migrations/002_generation_usage.sql` (token usage and cost columns), and optionally
+`migrations/003_generation_costs_view.sql` (per-attempt tokens and cost view), using a
 migration role, before running the CLI. The runtime role needs SELECT on the three catalog tables and
 SELECT/INSERT/UPDATE on the tracking table, **not** catalog write permissions.
 The external presign API, not this CLI, sets the recipe's `image_key`.
@@ -147,24 +148,29 @@ dish name so the image model uses its own knowledge of how the dish is served.
 warnings and errors only. Messages carry IDs and redacted error text, never prompts, URLs or credentials. SDK and HTTP
 library logging stays silenced because it can expose URLs.
 
-## Cost tracking
+## Tokens and cost per recipe
 
-Every billable call is also appended to a local CSV ledger, `cost_log.csv` in `ARTIFACT_DIR` (override with
-`COST_LOG_PATH`): one row per recipe per run with model, token counts, per-call and total estimated cost, prompt version
-and status. Dry runs are logged too, because their text calls cost money. The ledger needs no database migration, and a
-full disk or unwritable path never fails or retries a generation. Total spend: sum `total_cost_usd`.
+Every description and image call records the provider's token counts and an estimated cost, in three places:
 
-Every description and image call also records the token usage the provider returns, plus an estimated
-`cost_usd`, in `text_usage` / `image_usage` (jsonb) on the tracking row (needs migration 002). The CLI prints the
-estimated cost per recipe and per run.
+* **Printed after each run:** `<recipe id>: completed [3,209 tokens, est. $0.0505]` per recipe, plus `Tokens this run: ...; estimated cost: ...`.
+* **Local CSV ledger,** `cost_log.csv` in `ARTIFACT_DIR` (override with `COST_LOG_PATH`): one row per recipe per run that made a billable
+  call (dry runs too, because their text calls cost money). Columns: text and image model, input / output / reasoning tokens, per-call
+  cost, `text_total_tokens`, `image_total_tokens`, `total_tokens`, `total_cost_usd`, prompt version and status. A ledger written by an older
+  version is upgraded in place (old rows keep blanks in the new columns). A full disk or unwritable path never fails or retries a generation.
+* **Database,** per attempt, in `text_usage` / `image_usage` (jsonb; migration 002). Migration 003 adds a read-only view,
+  `catalog_image_generation_costs`, with one row per attempt: token counts by call, `total_tokens`, `text_cost_usd`, `image_cost_usd`
+  and `total_cost_usd`. Example: `SELECT sum(total_tokens), sum(total_cost_usd) FROM catalog_image_generation_costs;`
 
-* **Tokens are authoritative; dollars are estimates** from `src/forkplan_images/pricing.py`. Confirm the rates
-  on the provider pricing pages and edit `RATES` when they change. A model with no known rate, or an
-  unpriced token class, records `cost_usd: null` and is counted as "unpriced" in the run total.
-* Gemini image models return ~1,120 image-output tokens per 1K image, plus a few hundred text/reasoning tokens.
+* **Tokens are authoritative; dollars are estimates** from `src/forkplan_images/pricing.py`. Confirm the rates on the provider pricing
+  pages and edit `RATES` when they change. A model with no known rate, or an unpriced token class, records `cost_usd: null` and is
+  counted as "unpriced" in the run total.
+* **Reasoning tokens** (GPT-5 text models) are recorded separately for visibility but are already part of the output tokens and the cost;
+  they are not counted twice in `total_tokens`.
+* **Batched descriptions:** one request covers up to 10 recipes, so its tokens and cost are split evenly across them. Descriptions loaded
+  from the on-disk cache cost nothing in later runs.
 * A call that fails before a usable response (timeouts, 4xx/5xx, blocked prompts) has no usage to record;
   an uncertain attempt may still have been billed. Check the provider dashboard for those.
-* Total per attempt: `COALESCE((text_usage->>'cost_usd')::numeric,0) + COALESCE((image_usage->>'cost_usd')::numeric,0)`.
+* Gemini image models return about 1,120 image-output tokens per 1K image, plus a few hundred text/reasoning tokens.
 
 ## State, recovery and concurrency
 

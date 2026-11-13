@@ -31,11 +31,16 @@ RATES: dict[str, dict[str, float]] = {
 }
 
 
+TOKEN_KEYS = ("input_tokens", "output_text_tokens", "output_image_tokens")
+
+
 def build_usage(provider: str, model: str, *, input_tokens: int = 0, output_text_tokens: int = 0,
-                output_image_tokens: int = 0) -> dict[str, Any]:
+                output_image_tokens: int = 0, reasoning_tokens: int = 0) -> dict[str, Any]:
+    """reasoning_tokens is informational: it is already part of output_text_tokens and billed with it."""
     usage: dict[str, Any] = {
         "provider": provider, "model": model, "input_tokens": int(input_tokens),
         "output_text_tokens": int(output_text_tokens), "output_image_tokens": int(output_image_tokens),
+        "reasoning_tokens": int(reasoning_tokens),
     }
     usage["cost_usd"] = estimate_cost(usage)
     return usage
@@ -54,6 +59,11 @@ def estimate_cost(usage: Mapping[str, Any]) -> float | None:
             return None  # unpriced token class: do not under-report
         total += tokens * rates.get(rate_key, 0.0) / 1_000_000
     return round(total, 6)
+
+
+def total_tokens(*usages: Mapping[str, Any] | None) -> int:
+    """All input and output tokens across the given usage records (reasoning tokens are not counted twice)."""
+    return sum(int(usage.get(key) or 0) for usage in usages if isinstance(usage, Mapping) for key in TOKEN_KEYS)
 
 
 def total_cost(*usages: Mapping[str, Any] | None) -> tuple[float, int]:
@@ -75,6 +85,7 @@ LEDGER_COLUMNS = (
     "prompt_version", "text_model", "text_input_tokens", "text_output_tokens", "text_cost_usd",
     "image_model", "image_input_tokens", "image_output_text_tokens", "image_output_image_tokens",
     "image_cost_usd", "total_cost_usd", "unpriced_calls",
+    "text_reasoning_tokens", "text_total_tokens", "image_total_tokens", "total_tokens",
 )
 
 
@@ -83,6 +94,20 @@ class CostLedger:
 
     def __init__(self, path: Path):
         self.path, self._lock = Path(path), Lock()
+
+    def _upgrade_header(self) -> None:
+        """A ledger written by an older version lacks the newest columns: rewrite it once, blanks for old rows."""
+        if not self.path.exists():
+            return
+        with open(self.path, newline="") as handle:
+            reader = csv.DictReader(handle)
+            if tuple(reader.fieldnames or ()) == LEDGER_COLUMNS:
+                return
+            rows = list(reader)
+        with open(self.path, "w", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=LEDGER_COLUMNS, restval="")
+            writer.writeheader()
+            writer.writerows(rows)
 
     def record(self, *, run_kind: str, recipe_id: object, recipe_name: str, attempt_id: object = "",
                attempt_number: object = "", status: str, prompt_version: str = "",
@@ -100,9 +125,14 @@ class CostLedger:
             "image_output_image_tokens": image.get("output_image_tokens", ""),
             "image_cost_usd": image.get("cost_usd", ""), "total_cost_usd": round(known, 6),
             "unpriced_calls": unpriced,
+            "text_reasoning_tokens": text.get("reasoning_tokens", ""),
+            "text_total_tokens": total_tokens(text) if text else "",
+            "image_total_tokens": total_tokens(image) if image else "",
+            "total_tokens": total_tokens(text, image),
         }
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
+            self._upgrade_header()
             new = not self.path.exists()
             with open(self.path, "a", newline="") as handle:
                 writer = csv.DictWriter(handle, fieldnames=LEDGER_COLUMNS)

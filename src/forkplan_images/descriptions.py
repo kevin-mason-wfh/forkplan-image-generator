@@ -7,7 +7,7 @@ from openai import APIConnectionError, APIStatusError, OpenAI
 from pydantic import BaseModel, Field
 
 from .network import REQUEST_TIMEOUT_SECONDS, Checkpoint, retry_call
-from .pricing import build_usage, estimate_cost
+from .pricing import TOKEN_KEYS, build_usage, estimate_cost
 from .prompts import load_prompt
 from .state import Recipe
 from .storage import Storage
@@ -79,7 +79,7 @@ def _sum_usage(first: dict | None, second: dict | None) -> dict | None:
     if not first or not second:
         return first or second
     merged = dict(first)
-    for key in ("input_tokens", "output_text_tokens", "output_image_tokens"):
+    for key in (*TOKEN_KEYS, "reasoning_tokens"):
         merged[key] = int(first.get(key) or 0) + int(second.get(key) or 0)
     merged["cost_usd"] = estimate_cost(merged)
     return merged
@@ -100,7 +100,7 @@ def _even_share(usage: dict | None, parts: int) -> dict | None:
     if not usage or not parts:
         return None
     share = dict(usage)
-    for key in ("input_tokens", "output_text_tokens", "output_image_tokens"):
+    for key in (*TOKEN_KEYS, "reasoning_tokens"):
         share[key] = int(usage.get(key) or 0) // parts
     share["cost_usd"] = estimate_cost(share)
     return share
@@ -128,7 +128,9 @@ class OpenAIDescriber:
         usage = getattr(response, "usage", None)
         self.last_usage = _sum_usage(self.last_usage, build_usage(
             "openai", self.model, input_tokens=getattr(usage, "input_tokens", 0) or 0,
-            output_text_tokens=getattr(usage, "output_tokens", 0) or 0) if usage else None)
+            output_text_tokens=getattr(usage, "output_tokens", 0) or 0,
+            reasoning_tokens=getattr(getattr(usage, "output_tokens_details", None), "reasoning_tokens", 0) or 0,
+        ) if usage else None)
         if response.output_parsed is None:
             raise ValueError("Description refused or missing structured output")
         return response.output_parsed

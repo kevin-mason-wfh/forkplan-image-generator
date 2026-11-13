@@ -7,7 +7,7 @@ from .attempt_runner import AttemptRunner, ExportCopy, Services
 from .descriptions import BatchedDescriber, Describer, validate_description
 from .generation import Generator
 from .heartbeat import Heartbeat
-from .pricing import CostLedger, total_cost
+from .pricing import CostLedger, total_cost, total_tokens
 from .prompts import build_prompt
 from .redaction import redact
 from .repository import Repository, Work
@@ -43,6 +43,7 @@ class Result:
     status: str
     detail: str = ""
     cost_usd: float | None = None  # spend incurred by THIS run; None when nothing was billed/priced
+    tokens: int | None = None  # tokens used by THIS run (text + image); None when no call reported usage
 
 
 @dataclass
@@ -51,6 +52,7 @@ class Summary:
     images_dispatched: int = 0
     cost_usd: float = 0.0
     unpriced_calls: int = 0
+    total_tokens: int = 0
 
     def count_image_dispatch(self) -> None:
         self.images_dispatched += 1
@@ -143,6 +145,7 @@ class Orchestrator:
         known, unpriced = total_cost(*usages)
         summary.cost_usd += known
         summary.unpriced_calls += unpriced
+        summary.total_tokens += total_tokens(*usages)
         return known
 
     def _record_in_ledger(self, **row: Any) -> None:
@@ -173,8 +176,9 @@ class Orchestrator:
                 attempt = runner.attempt
                 usages = list(runner.usage.values())
                 known = self._add_to_summary(summary, *usages)
+                tokens = total_tokens(*usages)
                 summary.results.append(Result(work.recipe.id, outcome.status, outcome.detail,
-                                              round(known, 6) if usages else None))
+                                              round(known, 6) if usages else None, tokens if usages else None))
                 if usages:
                     self._record_in_ledger(
                         run_kind="generate", recipe_id=work.recipe.id, recipe_name=work.recipe.name,

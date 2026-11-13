@@ -111,9 +111,9 @@ def main(argv: list[str] | None = None) -> int:
     for result in summary.results:
         print(f"{result.resource_id}: {result.status}" +
               (f" — {redact(result.detail, config.secrets)}" if result.detail else "") +
-              (f" [est. ${result.cost_usd:.4f}]" if result.cost_usd is not None else ""))
+              (f" [{result.tokens:,} tokens, est. ${result.cost_usd:.4f}]" if result.cost_usd is not None else ""))
     print(f"Recipes considered: {len(summary.results)}; image requests dispatched: {summary.images_dispatched}; "
           f"uncertain: {sum(r.status == 'generation_uncertain' for r in summary.results)}")
     note = f" ({summary.unpriced_calls} call(s) unpriced: no rate configured)" if summary.unpriced_calls else ""
-    print(f"Estimated cost this run: ${summary.cost_usd:.4f}{note}; token usage saved per attempt")
+    print(f"Tokens this run: {summary.total_tokens:,}; estimated cost: ${summary.cost_usd:.4f}{note}; usage saved per attempt")
     return summary.exit_code

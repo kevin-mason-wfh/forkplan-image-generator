@@ -77,3 +77,55 @@ def test_cost_ledger_rows_for_generate_and_dry_run(tmp_path):
     assert rows[1]["image_model"] == "gemini-3.1-flash-image" and rows[1]["status"] == "completed"
     assert float(rows[1]["total_cost_usd"]) == pytest.approx(
         describe.last_usage["cost_usd"] + generate.last_usage["cost_usd"], abs=1e-6)
+
+
+def test_tokens_per_recipe_in_result_summary_and_ledger(tmp_path):
+    import csv
+
+    from forkplan_images.pricing import CostLedger, total_tokens
+    runner, repo, store, describe, generate, upload, recipes = setup(tmp_path)
+    runner.ledger = CostLedger(tmp_path / "cost_log.csv")
+    describe.last_usage = build_usage("openai", "gpt-5.4-mini", input_tokens=900, output_text_tokens=300, reasoning_tokens=200)
+    generate.last_usage = build_usage("openai", "gpt-image-2.6-flare", input_tokens=560, output_image_tokens=1449)
+    summary = runner.run(Options())
+    assert total_tokens(describe.last_usage, generate.last_usage) == 900 + 300 + 560 + 1449  # reasoning not double counted
+    assert summary.results[0].tokens == 3209 and summary.total_tokens == 3209
+    row = next(csv.DictReader((tmp_path / "cost_log.csv").read_text().splitlines()))
+    assert (row["text_total_tokens"], row["image_total_tokens"], row["total_tokens"], row["text_reasoning_tokens"]) == (
+        "1200", "2009", "3209", "200")
+    assert float(row["total_cost_usd"]) == pytest.approx(
+        0.0009 * 0.75 + 0.0003 * 4.5 + 560 * 5 / 1e6 + 1449 * 30 / 1e6, abs=1e-6)
+
+
+def test_older_ledger_is_upgraded_in_place_without_losing_rows(tmp_path):
+    import csv
+
+    from forkplan_images.pricing import LEDGER_COLUMNS, CostLedger
+    path = tmp_path / "cost_log.csv"
+    old = [c for c in LEDGER_COLUMNS if c not in ("text_reasoning_tokens", "text_total_tokens", "image_total_tokens", "total_tokens")]
+    path.write_text(",".join(old) + "\n" + ",".join(f"v{i}" for i in range(len(old))) + "\n")
+    CostLedger(path).record(run_kind="generate", recipe_id="r", recipe_name="Soup", status="completed",
+                            text=build_usage("openai", "gpt-4o-2024-08-06", input_tokens=10, output_text_tokens=5))
+    rows = list(csv.DictReader(path.read_text().splitlines()))
+    assert list(rows[0]) == list(LEDGER_COLUMNS) and len(rows) == 2
+    assert rows[0]["timestamp_utc"] == "v0" and rows[0]["total_tokens"] == ""  # old row kept, new columns blank
+    assert rows[1]["total_tokens"] == "15"
+
+
+def test_describer_records_reasoning_tokens():
+    from types import SimpleNamespace
+    from unittest.mock import Mock
+    from uuid import uuid4
+
+    from fakes import plain
+
+    from forkplan_images.descriptions import DishDescription, OpenAIDescriber
+    from forkplan_images.state import Recipe
+    client = Mock()
+    client.with_options.return_value = client
+    usage = SimpleNamespace(input_tokens=500, output_tokens=400, output_tokens_details=SimpleNamespace(reasoning_tokens=300))
+    client.responses.parse.return_value = SimpleNamespace(
+        output_parsed=DishDescription(description=plain("A plain plate holding the cooked dish.")), usage=usage)
+    describer = OpenAIDescriber(client, "gpt-5.4-mini")
+    describer.describe(Recipe(uuid4(), "Soup"))
+    assert describer.last_usage["reasoning_tokens"] == 300 and describer.last_usage["output_text_tokens"] == 400

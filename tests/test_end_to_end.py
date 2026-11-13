@@ -1,20 +1,20 @@
 import base64
-from dataclasses import replace
 import json
 import logging
+from dataclasses import replace
 from unittest.mock import Mock
 from uuid import uuid4
 
+import httpx
 import pytest
 import respx
-import httpx
+from fakes import MemoryRepository, plain
+from test_cli_config import environment
+from test_storage_imaging import png
 
-from fakes import MemoryRepository
 from forkplan_images import cli
 from forkplan_images.config import Config
 from forkplan_images.state import Recipe, Stage
-from test_cli_config import environment
-from test_storage_imaging import png
 
 
 @pytest.mark.parametrize("dry_run,upload_failure", [(False, False), (True, False), (False, True)])
@@ -32,7 +32,7 @@ def test_cli_with_real_sdk_and_mocked_http(tmp_path, monkeypatch, capsys, caplog
         "model": config.text_model, "output": [{
             "type": "message", "id": "msg_test", "status": "completed", "role": "assistant",
             "content": [{"type": "output_text", "annotations": [],
-                         "text": json.dumps({"description": "A smooth golden soup in a ceramic bowl."})}],
+                         "text": json.dumps({"description": plain("A smooth golden soup in a ceramic bowl.")})}],
         }],
     })
     images = respx.post("https://api.openai.com/v1/images/generations").respond(
@@ -79,7 +79,7 @@ def test_upload_retry_stops_when_another_worker_takes_ownership(tmp_path, monkey
         "model": config.text_model, "output": [{
             "type": "message", "id": "msg_test", "status": "completed", "role": "assistant",
             "content": [{"type": "output_text", "annotations": [],
-                         "text": json.dumps({"description": "A smooth golden soup in a ceramic bowl."})}],
+                         "text": json.dumps({"description": plain("A smooth golden soup in a ceramic bowl.")})}],
         }],
     })
     images = respx.post("https://api.openai.com/v1/images/generations").respond(

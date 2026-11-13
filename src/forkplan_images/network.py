@@ -6,9 +6,11 @@ from urllib.parse import urlsplit
 
 import httpx
 
-
 T = TypeVar("T")
 Checkpoint = Callable[[], None]
+
+REQUEST_TIMEOUT_SECONDS = 60.0  # text, download, presign and upload calls
+IMAGE_TIMEOUT_SECONDS = 180.0  # image generation is much slower
 
 
 def retry_call(operation: Callable[[], T], retryable: Callable[[Exception], bool], *,
@@ -44,7 +46,7 @@ def request(client: httpx.Client, method: str, url: str, *,
     def send() -> httpx.Response:
         # Explicit Request avoids inheriting client-wide auth/cookies/default headers.
         req = httpx.Request(method, url, headers=headers, content=content)
-        req.extensions["timeout"] = {key: 60.0 for key in ("connect", "read", "write", "pool")}
+        req.extensions["timeout"] = dict.fromkeys(("connect", "read", "write", "pool"), REQUEST_TIMEOUT_SECONDS)
         response = client.send(req, auth=None, follow_redirects=False)
         response.raise_for_status()
         return response

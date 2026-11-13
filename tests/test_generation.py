@@ -3,12 +3,11 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import httpx
-from openai import APIConnectionError, APIStatusError, OpenAI
 import pytest
 import respx
+from openai import APIConnectionError, APIStatusError, OpenAI
 
 from forkplan_images.generation import GenerationError, OpenAIGenerator
-
 
 SETTINGS = {"image_model": "gpt-image-1.5", "quality": "low", "size": "1024x1024"}
 
@@ -33,9 +32,8 @@ def test_failure_classification(status, uncertain):
 @respx.mock
 def test_real_sdk_does_not_retry_429():
     route = respx.post("https://api.openai.com/v1/images/generations").respond(429, json={"error": {"message": "rate limited"}})
-    with OpenAI(api_key="test-placeholder") as sdk, httpx.Client() as downloads:
-        with pytest.raises(GenerationError):
-            OpenAIGenerator(sdk, downloads).generate("prompt", SETTINGS)
+    with OpenAI(api_key="test-placeholder") as sdk, httpx.Client() as downloads, pytest.raises(GenerationError):
+        OpenAIGenerator(sdk, downloads).generate("prompt", SETTINGS)
     assert route.call_count == 1
 
 
@@ -44,9 +42,8 @@ def test_connection_failure_uncertain():
     client.with_options.return_value = client
     client.images.generate.side_effect = APIConnectionError(
         request=httpx.Request("POST", "https://api.openai.com/v1/images/generations"))
-    with httpx.Client() as downloads:
-        with pytest.raises(GenerationError) as error:
-            OpenAIGenerator(client, downloads).generate("prompt", SETTINGS)
+    with httpx.Client() as downloads, pytest.raises(GenerationError) as error:
+        OpenAIGenerator(client, downloads).generate("prompt", SETTINGS)
     assert error.value.uncertain
 
 

@@ -19,8 +19,11 @@ class Stage(StrEnum):
     RETIRED = "retired"
 
 
-ACTIVE = tuple(Stage)[:8]
-SUCCESSFUL = tuple(s for s in tuple(Stage)[:9] if s != Stage.GENERATING)
+# Stages where an attempt still has work to do (a lease may be held), in pipeline order.
+ACTIVE_STAGES = (Stage.SELECTED, Stage.DESCRIBED, Stage.PROMPT_BUILT, Stage.GENERATING, Stage.GENERATED,
+                 Stage.PROCESSED, Stage.PRESIGNED, Stage.UPLOADED)
+# Stages that are safe resume points after a failure (GENERATING is not: the image call may have been billed).
+SUCCESSFUL_STAGES = tuple(s for s in (*ACTIVE_STAGES, Stage.COMPLETED) if s != Stage.GENERATING)
 
 
 class LeaseLost(RuntimeError):
@@ -54,6 +57,8 @@ class Attempt:
     final_prompt: str | None = None
     prompt_version: str | None = None
     settings: dict[str, Any] = field(default_factory=dict)
+    text_usage: dict[str, Any] | None = None
+    image_usage: dict[str, Any] | None = None
     original_key: str | None = None
     jpeg_key: str | None = None
     jpeg_sha256: str | None = None

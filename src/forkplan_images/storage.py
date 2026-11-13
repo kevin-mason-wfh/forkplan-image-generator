@@ -1,6 +1,7 @@
 import os
-from pathlib import Path, PurePosixPath
+import re
 import tempfile
+from pathlib import Path, PurePosixPath
 from typing import Protocol
 
 
@@ -47,3 +48,13 @@ class LocalStorage:
 
     def exists(self, key: str) -> bool:
         return self._path(key).is_file()
+
+
+def export_local(root: Path, name: str, recipe_id: object, attempt_number: int, jpeg: bytes) -> Path:
+    """Save a readable, no-clobber copy of the final JPEG. Existing files are left untouched."""
+    slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:60] or "recipe"
+    destination = root / f"{slug}-{str(recipe_id)[:8]}-a{attempt_number}.jpg"
+    if destination.exists():
+        return destination
+    LocalStorage(root).put(destination.name, jpeg)
+    return destination

@@ -5,7 +5,7 @@ import pytest
 
 from forkplan_images import cli
 from forkplan_images.config import Config
-from forkplan_images.orchestrator import Options, Result, Summary
+from forkplan_images.orchestrator import Result, Summary
 
 
 def environment():
@@ -30,8 +30,13 @@ def test_configuration_models_required_and_settings_safe():
             Config.from_environment({k: v for k, v in env.items() if k != key})
 
 
+@pytest.mark.parametrize("model", ["gpt-image-2", "gpt-image-1.5-2026-01-01", "gpt-image-1-mini"])
+def test_newer_gpt_image_models_accepted(model):
+    assert Config.from_environment({**environment(), "OPENAI_IMAGE_MODEL": model}).image_model == model
+
+
 @pytest.mark.parametrize("key,value", [
-    ("OPENAI_IMAGE_MODEL", "unknown"), ("OPENAI_TEXT_MODEL", "unknown"),
+    ("OPENAI_IMAGE_MODEL", "unknown"), ("OPENAI_IMAGE_MODEL", "gpt-image-"), ("OPENAI_IMAGE_MODEL", "dall-e-3"), ("OPENAI_TEXT_MODEL", "unknown"),
     ("OPENAI_IMAGE_SIZE", "1536x1024"), ("OPENAI_IMAGE_QUALITY", "ultra"),
     ("LEASE_SECONDS", "180"), ("LEASE_SECONDS", "invalid"),
     ("API_BASE_URL", "http://api.example.test"), ("DATABASE_URL", "sqlite://"),

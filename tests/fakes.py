@@ -3,9 +3,9 @@ from threading import RLock
 from time import monotonic
 from uuid import uuid4
 
-from forkplan_images.repository import Work, clean_changes
 from forkplan_images.redaction import redact
-from forkplan_images.state import ACTIVE, Attempt, ClaimConflict, LeaseLost, Stage
+from forkplan_images.repository import Work, sanitize_changes
+from forkplan_images.state import ACTIVE_STAGES, Attempt, ClaimConflict, LeaseLost, Stage
 
 
 class MemoryRepository:
@@ -17,11 +17,11 @@ class MemoryRepository:
         self.lock = RLock()
         self.writes = []
 
-    def candidates(self, limit, ids=(), retry=False):
+    def candidates(self, limit, ids=(), include_failed=False):
         with self.lock:
             attempts = [
                 a for a in self.attempts.values()
-                if (a.stage in ACTIVE or (retry and a.stage == Stage.FAILED))
+                if (a.stage in ACTIVE_STAGES or (include_failed and a.stage == Stage.FAILED))
                 and not self.held(a) and (not ids or a.resource_id in ids)
             ]
             work = [Work(self.recipes[a.resource_id], deepcopy(a)) for a in attempts]
@@ -83,7 +83,7 @@ class MemoryRepository:
     def update(self, attempt_id, token, **changes):
         with self.lock:
             a = self.owned(attempt_id, token)
-            changes = clean_changes(changes, self.secrets)
+            changes = sanitize_changes(changes, self.secrets)
             for key, value in changes.items():
                 setattr(a, key, value)
             self.writes.append(("update", deepcopy(changes)))
@@ -99,3 +99,8 @@ class MemoryRepository:
             a = self.owned(attempt_id, token)
             a.lease_owner = a.lease_token = a.lease_expires_at = None
             self.writes.append(("release", attempt_id))
+
+
+def plain(text: str) -> str:
+    """A clean description padded past the minimum length (no banned words), for tests that fake the text model."""
+    return text + " The surface is matte and slightly uneven." * 6

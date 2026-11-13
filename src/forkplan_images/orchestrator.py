@@ -1,67 +1,21 @@
-from collections.abc import Callable
+import logging
 from dataclasses import dataclass, field
-from threading import Event, Thread
-from typing import Any, TypeVar
+from typing import Any
 from uuid import UUID, uuid4
 
-from .descriptions import Describer, validate
-from .generation import GenerationError, Generator
-from .imaging import fingerprint, process, verify
-from .prompts import PROMPT_VERSION, build_prompt
+from .attempt_runner import AttemptRunner, ExportCopy, Services
+from .descriptions import BatchedDescriber, Describer, validate_description
+from .generation import Generator
+from .heartbeat import Heartbeat
+from .pricing import CostLedger, total_cost
+from .prompts import build_prompt
 from .redaction import redact
 from .repository import Repository, Work
 from .state import Attempt, ClaimConflict, LeaseLost, Stage
 from .storage import Storage
 from .uploads import Uploader
 
-
-T = TypeVar("T")
-
-
-class Heartbeat:
-    def __init__(self, repository: Repository, attempt: Attempt, seconds: int):
-        self.repository, self.attempt, self.seconds = repository, attempt, seconds
-        self.stop = Event()
-        self.lost = Event()
-        self.thread = Thread(target=self._run, daemon=True)
-
-    def _run(self) -> None:
-        while not self.stop.wait(self.seconds / 3):
-            try:
-                self.repository.renew(self.attempt.id, self.attempt.lease_token, self.seconds)
-            except Exception:
-                self.lost.set()
-                return
-
-    def check(self) -> None:
-        if self.lost.is_set():
-            raise LeaseLost("Lease renewal failed; processing stopped")
-
-    def fence(self) -> None:
-        self.check()
-        try:
-            self.repository.renew(self.attempt.id, self.attempt.lease_token, self.seconds)
-        except Exception:
-            self.lost.set()
-            raise LeaseLost("Lease renewal failed; processing stopped") from None
-        self.check()
-
-    def call(self, operation: Callable[[], T]) -> T:
-        self.fence()
-        try:
-            result = operation()
-        finally:
-            self.check()
-        self.check()
-        return result
-
-    def __enter__(self) -> "Heartbeat":
-        self.thread.start()
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        self.stop.set()
-        self.thread.join()
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -88,12 +42,18 @@ class Result:
     resource_id: UUID
     status: str
     detail: str = ""
+    cost_usd: float | None = None  # spend incurred by THIS run; None when nothing was billed/priced
 
 
 @dataclass
 class Summary:
     results: list[Result] = field(default_factory=list)
-    dispatched: int = 0
+    images_dispatched: int = 0
+    cost_usd: float = 0.0
+    unpriced_calls: int = 0
+
+    def count_image_dispatch(self) -> None:
+        self.images_dispatched += 1
 
     @property
     def exit_code(self) -> int:
@@ -104,146 +64,141 @@ class Summary:
 class Orchestrator:
     def __init__(self, repository: Repository, storage: Storage, describer: Describer,
                  generator: Generator, uploader: Uploader, settings: dict[str, Any],
-                 lease_seconds: int = 300, secrets: tuple[str, ...] = ()):
+                 lease_seconds: int = 300, secrets: tuple[str, ...] = (),
+                 export_copy: ExportCopy | None = None,
+                 ledger: CostLedger | None = None):
         self.repository, self.storage = repository, storage
         self.describer, self.generator, self.uploader = describer, generator, uploader
         self.settings, self.lease_seconds, self.secrets = settings, lease_seconds, secrets
+        self.export_copy = export_copy
+        self.ledger = ledger
 
     def run(self, options: Options) -> Summary:
         summary = Summary()
-        owner = str(uuid4())
         if not options.limit:
             return summary
-        if options.redo:
-            if not options.max_images:
-                summary.results.append(Result(options.redo, "skipped", "Image cap; no writes"))
-                return summary
-            try:
-                work = [self.repository.redo(options.redo, owner, self.lease_seconds, options.note)]
-            except ClaimConflict:
-                summary.results.append(Result(options.redo, "failed", "Redo refused: valid lease"))
-                return summary
-        else:
-            work = self.repository.candidates(options.limit, options.ids, options.retry_failures)
+        owner = str(uuid4())
+        work = self._select_work(options, owner, summary)
+        self._prefetch_descriptions(work, options)
         for item in work:
             if options.dry_run:
-                try:
-                    if item.attempt:
-                        detail = f"Would resume from {item.attempt.stage}"
-                    else:
-                        description = validate(self.describer.describe(item.recipe))
-                        build_prompt(item.recipe, description)
-                        detail = "Description validated; would generate and upload"
-                    summary.results.append(Result(item.recipe.id, "dry_run", detail))
-                except Exception as exc:
-                    summary.results.append(Result(item.recipe.id, "failed", redact(str(exc), self.secrets)))
-                continue
-            stage = item.attempt.stage if item.attempt else Stage.SELECTED
-            if stage == Stage.FAILED:
-                stage = item.attempt.last_successful_stage
-            needs_generation = stage in (Stage.SELECTED, Stage.DESCRIBED, Stage.PROMPT_BUILT)
-            if needs_generation and summary.dispatched >= options.max_images:
-                summary.results.append(Result(item.recipe.id, "skipped", "Image cap; no writes"))
-                continue
-            try:
-                attempt = (item.attempt if options.redo else
-                           self.repository.claim(item, owner, self.lease_seconds))
-            except ClaimConflict:
-                summary.results.append(Result(item.recipe.id, "skipped", "Claim conflict"))
-                continue
-            except Exception as exc:
-                summary.results.append(Result(item.recipe.id, "failed", redact(str(exc), self.secrets)))
-                continue
-            self._process(item, attempt, summary)
+                summary.results.append(self._dry_run(item, summary))
+            else:
+                self._run_item(item, options, owner, summary)
         return summary
 
-    def _process(self, work: Work, attempt: Attempt, summary: Summary) -> None:
-        repository, storage = self.repository, self.storage
-        token = attempt.lease_token
-
-        def update(**changes: Any) -> None:
-            nonlocal attempt
-            heartbeat.check()
-            attempt = repository.update(attempt.id, token, **changes)
-
-        def advance(stage: Stage, **changes: Any) -> None:
-            update(stage=stage, last_successful_stage=stage, **changes)
-
+    def _select_work(self, options: Options, owner: str, summary: Summary) -> list[Work]:
+        """Resumable and fresh recipes, or the single redo attempt. A refused redo is reported and yields no work."""
+        if not options.redo:
+            return self.repository.candidates(options.limit, options.ids, options.retry_failures)
+        if not options.max_images:
+            summary.results.append(Result(options.redo, "skipped", "Image cap; no writes"))
+            return []
         try:
-            with Heartbeat(repository, attempt, self.lease_seconds) as heartbeat:
-                try:
-                    if attempt.stage == Stage.SELECTED:
-                        description = heartbeat.call(lambda: self.describer.describe(
-                            work.recipe, checkpoint=heartbeat.fence))
-                        advance(Stage.DESCRIBED, description=validate(description), settings=self.settings)
-                    if attempt.stage == Stage.DESCRIBED:
-                        advance(Stage.PROMPT_BUILT,
-                                final_prompt=build_prompt(work.recipe, attempt.description),
-                                prompt_version=PROMPT_VERSION, settings=attempt.settings or self.settings)
-                    if attempt.stage == Stage.GENERATING:
-                        if storage.exists(attempt.original_storage_key):
-                            advance(Stage.GENERATED, original_key=attempt.original_storage_key)
-                        else:
-                            raise GenerationError("Interrupted generation has no saved original", True)
-                    if attempt.stage == Stage.PROMPT_BUILT:
-                        # update() commits before returning, before any billed dispatch.
-                        update(stage=Stage.GENERATING)
-                        def generate() -> bytes:
-                            summary.dispatched += 1
-                            return self.generator.generate(attempt.final_prompt, attempt.settings,
-                                                           checkpoint=heartbeat.fence)
+            return [self.repository.redo(options.redo, owner, self.lease_seconds, options.note)]
+        except ClaimConflict:
+            summary.results.append(Result(options.redo, "failed", "Redo refused: valid lease"))
+            return []
 
-                        original = heartbeat.call(generate)
-                        heartbeat.call(lambda: storage.put(attempt.original_storage_key, original))
-                        advance(Stage.GENERATED, original_key=attempt.original_storage_key)
-                    if attempt.stage == Stage.GENERATED:
-                        if storage.exists(attempt.jpeg_storage_key):
-                            jpeg = fingerprint(storage.get(attempt.jpeg_storage_key))
-                            verify(jpeg.data, jpeg.sha256, jpeg.length)
-                        else:
-                            jpeg = heartbeat.call(lambda: process(storage.get(attempt.original_key)))
-                            heartbeat.call(lambda: storage.put(attempt.jpeg_storage_key, jpeg.data))
-                        advance(Stage.PROCESSED, jpeg_key=attempt.jpeg_storage_key,
-                                jpeg_sha256=jpeg.sha256, jpeg_length=jpeg.length)
-                    if attempt.stage in (Stage.PROCESSED, Stage.PRESIGNED):
-                        data = heartbeat.call(lambda: storage.get(attempt.jpeg_key))
-                        verify(data, attempt.jpeg_sha256, attempt.jpeg_length)
-                        presign = heartbeat.call(lambda: self.uploader.presign(
-                            work.recipe.id, f"{attempt.id}.jpg", len(data), checkpoint=heartbeat.fence))
-                        advance(Stage.PRESIGNED)
-                        heartbeat.call(lambda: self.uploader.upload(
-                            presign, data, checkpoint=heartbeat.fence))
-                        # The key belongs to THIS successful PUT, never an earlier presign.
-                        advance(Stage.UPLOADED, image_key=presign.image_key)
-                    if attempt.stage == Stage.UPLOADED:
-                        advance(Stage.COMPLETED)
-                    summary.results.append(Result(work.recipe.id, str(attempt.stage)))
-                except LeaseLost:
-                    raise
-                except Exception as exc:
-                    heartbeat.check()
-                    uncertain = isinstance(exc, GenerationError) and exc.uncertain
-                    changes: dict[str, Any] = {}
-                    if attempt.stage == Stage.GENERATING and not isinstance(exc, GenerationError):
-                        if storage.exists(attempt.original_storage_key):
-                            changes.update(last_successful_stage=Stage.GENERATED,
-                                           original_key=attempt.original_storage_key)
-                        else:
-                            uncertain = True
-                    status = Stage.UNCERTAIN if uncertain else Stage.FAILED
-                    detail = redact(str(exc), self.secrets)
-                    update(stage=status, error_type=type(exc).__name__, error_message=detail, **changes)
-                    summary.results.append(Result(work.recipe.id, str(status), detail))
+    def _dry_run(self, item: Work, summary: Summary) -> Result:
+        """Report what a real run would do. Only the (billed) description call is made; nothing is persisted."""
+        try:
+            if item.attempt:
+                return Result(item.recipe.id, "dry_run", f"Would resume from {item.attempt.stage}")
+            try:
+                description = validate_description(self.describer.describe(item.recipe))
+            finally:
+                usage = getattr(self.describer, "last_usage", None)
+                if isinstance(usage, dict):
+                    self._add_to_summary(summary, usage)
+                    self._record_in_ledger(run_kind="dry_run", recipe_id=item.recipe.id,
+                                           recipe_name=item.recipe.name, status="dry_run", text=usage)
+            build_prompt(item.recipe, description)
+            return Result(item.recipe.id, "dry_run", "Description validated; would generate and upload")
+        except Exception as exc:
+            return Result(item.recipe.id, "failed", redact(str(exc), self.secrets))
+
+    def _run_item(self, item: Work, options: Options, owner: str, summary: Summary) -> None:
+        stage = item.attempt.stage if item.attempt else Stage.SELECTED
+        if stage == Stage.FAILED:
+            stage = item.attempt.last_successful_stage
+        needs_generation = stage in (Stage.SELECTED, Stage.DESCRIBED, Stage.PROMPT_BUILT)
+        if needs_generation and summary.images_dispatched >= options.max_images:
+            summary.results.append(Result(item.recipe.id, "skipped", "Image cap; no writes"))
+            return
+        try:
+            attempt = (item.attempt if options.redo else
+                       self.repository.claim(item, owner, self.lease_seconds))
+        except ClaimConflict:
+            log.info("recipe %s: claim conflict; skipped", item.recipe.id)
+            summary.results.append(Result(item.recipe.id, "skipped", "Claim conflict"))
+            return
+        except Exception as exc:
+            summary.results.append(Result(item.recipe.id, "failed", redact(str(exc), self.secrets)))
+            return
+        self._process(item, attempt, summary)
+
+    @staticmethod
+    def _add_to_summary(summary: Summary, *usages: dict[str, Any]) -> float:
+        known, unpriced = total_cost(*usages)
+        summary.cost_usd += known
+        summary.unpriced_calls += unpriced
+        return known
+
+    def _record_in_ledger(self, **row: Any) -> None:
+        if self.ledger:
+            try:
+                self.ledger.record(**row)
+            except OSError as exc:  # a full disk must never fail or retry a generation
+                log.warning("cost ledger write failed: %s", type(exc).__name__)
+
+    def _prefetch_descriptions(self, work: list[Work], options: Options) -> None:
+        """Batch the descriptions this run will need, up to the image cap, in as few requests as possible."""
+        if not isinstance(self.describer, BatchedDescriber):
+            return
+        pending = [w.recipe for w in work if w.attempt is None or w.attempt.stage == Stage.SELECTED]
+        cap = None if options.dry_run else options.max_images
+        try:
+            self.describer.prefetch(pending[:cap], persist=not options.dry_run)
+        except Exception as exc:  # unprefetched recipes are described one by one and report their own errors
+            log.warning("batched descriptions failed (%s); describing recipes one by one",
+                        redact(str(exc), self.secrets))
+
+    def _process(self, work: Work, attempt: Attempt, summary: Summary) -> None:
+        token = attempt.lease_token
+        try:
+            with Heartbeat(self.repository, attempt, self.lease_seconds) as heartbeat:
+                runner = AttemptRunner(self._services(), work, attempt, heartbeat, summary.count_image_dispatch)
+                outcome = runner.run()
+                attempt = runner.attempt
+                usages = list(runner.usage.values())
+                known = self._add_to_summary(summary, *usages)
+                summary.results.append(Result(work.recipe.id, outcome.status, outcome.detail,
+                                              round(known, 6) if usages else None))
+                if usages:
+                    self._record_in_ledger(
+                        run_kind="generate", recipe_id=work.recipe.id, recipe_name=work.recipe.name,
+                        attempt_id=attempt.id, attempt_number=attempt.attempt_number, status=outcome.status,
+                        prompt_version=attempt.prompt_version or "",
+                        text=runner.usage.get("text"), image=runner.usage.get("image"))
+                log.info("recipe %s: %s", work.recipe.id, outcome.status)
         except LeaseLost:
             # Never retry a rejected write, including error or release writes.
+            log.warning("recipe %s: ownership lost; stopped", work.recipe.id)
             summary.results.append(Result(work.recipe.id, "lease_lost", "Ownership lost; stopped"))
             return
         except Exception as exc:
             # A database/storage outage may prevent even recording an error.
-            summary.results.append(Result(work.recipe.id, "failed", redact(str(exc), self.secrets)))
+            detail = redact(str(exc), self.secrets)
+            log.error("recipe %s: could not record progress: %s", work.recipe.id, detail)
+            summary.results.append(Result(work.recipe.id, "failed", detail))
             return
         try:
-            repository.release(attempt.id, token)
+            self.repository.release(attempt.id, token)
         except Exception:
             # Never retry release: another worker may already own the attempt.
-            pass
+            log.warning("recipe %s: lease release rejected; leaving it to expire", work.recipe.id)
+
+    def _services(self) -> Services:
+        return Services(self.repository, self.storage, self.describer, self.generator, self.uploader,
+                        self.settings, self.secrets, self.export_copy)

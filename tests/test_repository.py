@@ -1,10 +1,10 @@
-from uuid import uuid4
 from dataclasses import asdict
 from unittest.mock import MagicMock
+from uuid import uuid4
 
 import pytest
-
 from fakes import MemoryRepository
+
 from forkplan_images.repository import PostgresRepository, Work
 from forkplan_images.state import Attempt, ClaimConflict, LeaseLost, Recipe, Stage
 
@@ -36,7 +36,7 @@ def test_terminal_exclusion_retry_and_redo(stage):
         repo.redo(recipe.id, "two", 10, None)
     repo.release(a.id, a.lease_token)
     assert not repo.candidates(10)
-    assert bool(repo.candidates(10, retry=True)) == (stage == Stage.FAILED)
+    assert bool(repo.candidates(10, include_failed=True)) == (stage == Stage.FAILED)
     next_work = repo.redo(recipe.id, "two", 10, "manual")
     assert repo.attempts[a.id].superseded_by == next_work.attempt.id
     assert repo.attempts[a.id].stage == Stage.RETIRED
@@ -50,7 +50,7 @@ def test_retry_keeps_progress_and_clears_errors():
     repo.update(a.id, a.lease_token, stage=Stage.FAILED,
                 last_successful_stage=Stage.PROCESSED, error_message="failure")
     repo.release(a.id, a.lease_token)
-    retried = repo.claim(repo.candidates(1, retry=True)[0], "two", 10)
+    retried = repo.claim(repo.candidates(1, include_failed=True)[0], "two", 10)
     assert retried.stage == Stage.PROCESSED
     assert retried.retry_count == 1
     assert retried.error_message is None

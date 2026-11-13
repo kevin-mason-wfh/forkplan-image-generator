@@ -1,13 +1,13 @@
+import json
 from dataclasses import dataclass, fields
 from typing import Any, Protocol
 from uuid import UUID, uuid4
-import json
 
 from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Connection, Engine
 
 from .redaction import redact
-from .state import ACTIVE, Attempt, ClaimConflict, LeaseLost, Recipe, Stage
+from .state import ACTIVE_STAGES, Attempt, ClaimConflict, LeaseLost, Recipe, Stage
 
 
 @dataclass(frozen=True)
@@ -17,7 +17,7 @@ class Work:
 
 
 class Repository(Protocol):
-    def candidates(self, limit: int, ids: tuple[UUID, ...], retry: bool) -> list[Work]: ...
+    def candidates(self, limit: int, ids: tuple[UUID, ...], include_failed: bool) -> list[Work]: ...
     def claim(self, work: Work, owner: str, seconds: int) -> Attempt: ...
     def redo(self, resource_id: UUID, owner: str, seconds: int, note: str | None) -> Work: ...
     def update(self, attempt_id: UUID, token: UUID, **changes: Any) -> Attempt: ...
@@ -25,16 +25,16 @@ class Repository(Protocol):
     def release(self, attempt_id: UUID, token: UUID) -> None: ...
 
 
-MUTABLE = {
+MUTABLE_ATTEMPT_FIELDS = {
     "stage", "last_successful_stage", "description", "final_prompt", "prompt_version",
-    "settings", "original_key", "jpeg_key", "jpeg_sha256", "jpeg_length", "image_key",
+    "settings", "text_usage", "image_usage", "original_key", "jpeg_key", "jpeg_sha256", "jpeg_length", "image_key",
     "error_type", "error_message",
 }
 ATTEMPT_FIELDS = {f.name for f in fields(Attempt)}
 
 
-def clean_changes(changes: dict[str, Any], secrets: tuple[str, ...]) -> dict[str, Any]:
-    if not changes or not changes.keys() <= MUTABLE:
+def sanitize_changes(changes: dict[str, Any], secrets: tuple[str, ...]) -> dict[str, Any]:
+    if not changes or not changes.keys() <= MUTABLE_ATTEMPT_FIELDS:
         raise ValueError("Unsupported attempt update")
     return {
         key: redact(str(value), secrets) if key.startswith("error_") and value else value
@@ -42,7 +42,7 @@ def clean_changes(changes: dict[str, Any], secrets: tuple[str, ...]) -> dict[str
     }
 
 
-def decode(row: Any) -> Attempt:
+def attempt_from_row(row: Any) -> Attempt:
     values = {k: v for k, v in row.items() if k in ATTEMPT_FIELDS}
     values["stage"] = Stage(values["stage"])
     values["last_successful_stage"] = Stage(values["last_successful_stage"])
@@ -70,8 +70,8 @@ class PostgresRepository:
             status=row["status"], ingredients=tuple(dict(i) for i in ingredients),
         )
 
-    def candidates(self, limit: int, ids: tuple[UUID, ...] = (), retry: bool = False) -> list[Work]:
-        stages = [s.value for s in ACTIVE] + ([Stage.FAILED.value] if retry else [])
+    def candidates(self, limit: int, ids: tuple[UUID, ...] = (), include_failed: bool = False) -> list[Work]:
+        stages = [s.value for s in ACTIVE_STAGES] + ([Stage.FAILED.value] if include_failed else [])
         with self.engine.connect() as conn:
             attempts = conn.execute(text("""
                 SELECT * FROM catalog_image_generations
@@ -81,7 +81,7 @@ class PostgresRepository:
                 ORDER BY created_at, id LIMIT :limit
             """).bindparams(bindparam("stages", expanding=True), bindparam("ids", expanding=True)),
                 {"stages": stages, "ids": ids, "all_ids": not ids, "limit": limit}).mappings()
-            work = [Work(self._recipe(conn, row["resource_id"]), decode(row)) for row in attempts]
+            work = [Work(self._recipe(conn, row["resource_id"]), attempt_from_row(row)) for row in attempts]
             remaining = limit - len(work)
             if remaining:
                 rows = conn.execute(text("""
@@ -124,7 +124,7 @@ class PostgresRepository:
         """), {"id": attempt_id or uuid4(), "resource_id": resource_id, "number": number,
                "owner": owner, "token": uuid4(), "seconds": seconds,
                "note": redact(note, self.secrets) if note else None}).mappings().one()
-        return decode(row)
+        return attempt_from_row(row)
 
     def claim(self, work: Work, owner: str, seconds: int) -> Attempt:
         with self.engine.begin() as conn:
@@ -147,7 +147,7 @@ class PostgresRepository:
                        "id": work.attempt.id, "expected": work.attempt.stage.value}).mappings().first()
                 if row is None:
                     raise ClaimConflict("Attempt already claimed or changed")
-                return decode(row)
+                return attempt_from_row(row)
             exists = conn.execute(text("""
                 SELECT 1 FROM catalog_image_generations
                 WHERE resource_type = 'recipe' AND resource_id = :id AND stage <> 'retired'
@@ -190,12 +190,13 @@ class PostgresRepository:
             return Work(recipe, attempt)
 
     def update(self, attempt_id: UUID, token: UUID, **changes: Any) -> Attempt:
-        changes = clean_changes(changes, self.secrets)
+        changes = sanitize_changes(changes, self.secrets)
         assignments = []
         params: dict[str, Any] = {"id": attempt_id, "token": token}
         for key, value in changes.items():
-            assignments.append(f"{key} = CAST(:{key} AS jsonb)" if key == "settings" else f"{key} = :{key}")
-            params[key] = json.dumps(value) if key == "settings" else value
+            is_json = key in ("settings", "text_usage", "image_usage")
+            assignments.append(f"{key} = CAST(:{key} AS jsonb)" if is_json else f"{key} = :{key}")
+            params[key] = json.dumps(value) if is_json else value
         if changes.get("stage") == Stage.COMPLETED:
             assignments.append("completed_at = now()")
         with self.engine.begin() as conn:
@@ -207,7 +208,7 @@ class PostgresRepository:
             """), params).mappings().first()
             if row is None:
                 raise LeaseLost("Lease lost; state write rejected")
-            return decode(row)
+            return attempt_from_row(row)
 
     def renew(self, attempt_id: UUID, token: UUID, seconds: int) -> None:
         with self.engine.begin() as conn:

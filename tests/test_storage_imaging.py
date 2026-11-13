@@ -1,8 +1,8 @@
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
-from PIL import Image
 import pytest
+from PIL import Image
 
 from forkplan_images.imaging import process, verify
 from forkplan_images.storage import LocalStorage
@@ -57,3 +57,14 @@ def test_quality_then_dimension_reduction():
     assert jpeg.length < 2000
     with Image.open(BytesIO(jpeg.data)) as image:
         assert image.width < 1000
+
+
+def test_export_local_is_readable_and_no_clobber(tmp_path):
+    from uuid import uuid4
+
+    from forkplan_images.storage import export_local
+    rid = uuid4()
+    first = export_local(tmp_path / "out", "Steak & Mash!", rid, 2, b"one")
+    assert first.name == f"steak-mash-{str(rid)[:8]}-a2.jpg"
+    assert export_local(tmp_path / "out", "Steak & Mash!", rid, 2, b"two") == first
+    assert first.read_bytes() == b"one"

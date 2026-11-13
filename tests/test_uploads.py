@@ -6,8 +6,8 @@ import pytest
 import respx
 
 from forkplan_images.network import request
-from forkplan_images.uploads import HttpUploader
 from forkplan_images.state import LeaseLost
+from forkplan_images.uploads import HttpUploader
 
 
 @respx.mock

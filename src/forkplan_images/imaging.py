@@ -4,7 +4,6 @@ from io import BytesIO
 
 from PIL import Image, ImageOps
 
-
 MAX_JPEG_BYTES = 4_900_000
 
 

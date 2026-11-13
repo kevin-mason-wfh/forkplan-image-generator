@@ -1,19 +1,19 @@
-from copy import deepcopy
 import time
+from copy import deepcopy
 from unittest.mock import Mock
 from uuid import uuid4
 
 import pytest
-
 from fakes import MemoryRepository
+from test_storage_imaging import png
+
 from forkplan_images.generation import GenerationError
 from forkplan_images.imaging import process
 from forkplan_images.orchestrator import Heartbeat, Options, Orchestrator
 from forkplan_images.repository import Work
-from forkplan_images.state import ACTIVE, LeaseLost, Recipe, Stage
+from forkplan_images.state import ACTIVE_STAGES, Recipe, Stage
 from forkplan_images.storage import LocalStorage
 from forkplan_images.uploads import Presign
-from test_storage_imaging import png
 
 
 def setup(tmp_path, count=1):
@@ -50,7 +50,7 @@ def seed(runner, repo, store, recipe, stage):
     return a
 
 
-@pytest.mark.parametrize("stage", ACTIVE)
+@pytest.mark.parametrize("stage", ACTIVE_STAGES)
 def test_resume_every_active_stage(tmp_path, stage):
     runner, repo, store, describe, generate, upload, recipes = setup(tmp_path)
     a = seed(runner, repo, store, recipes[0], stage)
@@ -78,10 +78,10 @@ def test_generating_without_original_is_uncertain(tmp_path):
     result = runner.run(Options(retry_failures=True, max_images=0))
     assert result.exit_code == 1
     assert repo.attempts[a.id].stage == Stage.UNCERTAIN
-    assert result.dispatched == 0
+    assert result.images_dispatched == 0
     generate.generate.assert_not_called()
     upload.presign.assert_not_called()
-    assert not repo.candidates(10, retry=True)
+    assert not repo.candidates(10, include_failed=True)
 
 
 def test_marker_committed_before_dispatch_and_original_before_generated(tmp_path):
@@ -109,7 +109,7 @@ def test_failed_dispatches_count_toward_cap_and_others_untouched(tmp_path, uncer
     runner, repo, _, _, generate, _, _ = setup(tmp_path, 3)
     generate.generate.side_effect = GenerationError("rejected", uncertain)
     result = runner.run(Options(limit=3, max_images=1))
-    assert result.dispatched == 1
+    assert result.images_dispatched == 1
     assert result.exit_code == 1
     assert len(repo.attempts) == 1
     assert generate.generate.call_count == 1
@@ -124,7 +124,7 @@ def test_limit_and_max_images_zero_leave_work_untouched(tmp_path):
     generate.generate.assert_not_called()
     upload.presign.assert_not_called()
     result = runner.run(Options(limit=1, max_images=3))
-    assert result.dispatched == 1
+    assert result.images_dispatched == 1
     assert len(repo.attempts) == 1
 
 
@@ -132,7 +132,7 @@ def test_resume_before_fresh_and_recovered_original_costs_no_dispatch(tmp_path):
     runner, repo, store, _, generate, _, recipes = setup(tmp_path, 2)
     a = seed(runner, repo, store, recipes[1], Stage.GENERATING)
     result = runner.run(Options(limit=1, max_images=0))
-    assert result.dispatched == 0
+    assert result.images_dispatched == 0
     assert len(repo.attempts) == 1
     assert repo.attempts[a.id].stage == Stage.COMPLETED
     generate.generate.assert_not_called()
@@ -293,3 +293,14 @@ def test_lost_lease_during_generation_does_not_write_original(tmp_path):
     assert not store.exists(a.original_storage_key)
     assert a.stage == Stage.GENERATING
     upload.presign.assert_not_called()
+
+
+def test_batched_describer_prefetches_only_what_the_image_cap_allows(tmp_path):
+    from forkplan_images.descriptions import BatchedDescriber
+    runner, repo, store, describe, generate, upload, recipes = setup(tmp_path, 3)
+    batched = Mock(spec=BatchedDescriber)
+    batched.describe.return_value = "A smooth golden soup in a ceramic bowl."
+    runner.describer = batched
+    runner.run(Options(limit=3, max_images=2))
+    (prefetched,), keywords = batched.prefetch.call_args
+    assert len(prefetched) == 2 and keywords == {"persist": True}

@@ -30,7 +30,7 @@ class Repository(Protocol):
 
 MUTABLE_ATTEMPT_FIELDS = {
     "stage", "last_successful_stage", "description", "description_version", "final_prompt", "prompt_version",
-    "settings", "text_usage", "image_usage", "original_key", "jpeg_key", "jpeg_sha256", "jpeg_length", "image_key",
+    "settings", "text_usage", "image_usage", "jpeg_sha256", "jpeg_length", "image_key",
     "error_type", "error_message",
 }
 ATTEMPT_FIELDS = {f.name for f in fields(Attempt)}

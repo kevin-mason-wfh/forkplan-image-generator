@@ -39,7 +39,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("-v", "--verbose", action="store_true",
                         help="Log progress (stage changes, skips, failures) to stderr; secrets are redacted")
     result.add_argument("--retry-failures", action="store_true",
-                        help="Reopen failed attempts from saved progress; never retry uncertain attempts")
+                        help="Resume failed attempts that saved their image; start a new linked attempt for earlier failures; never retry uncertain attempts")
     result.add_argument("--redo", type=UUID, help="Start a new attempt for exactly one recipe (earlier attempts stay as history)")
     result.add_argument("--release-uncertain", type=UUID, metavar="RECIPE_ID",
                         help="After checking the provider, free a recipe whose image request outcome is uncertain so it can be redone")

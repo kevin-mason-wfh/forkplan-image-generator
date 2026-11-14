@@ -63,8 +63,6 @@ class Attempt:
     settings: dict[str, Any] = field(default_factory=dict)
     text_usage: dict[str, Any] | None = None
     image_usage: dict[str, Any] | None = None
-    original_key: str | None = None
-    jpeg_key: str | None = None
     jpeg_sha256: str | None = None
     jpeg_length: int | None = None
     image_key: str | None = None

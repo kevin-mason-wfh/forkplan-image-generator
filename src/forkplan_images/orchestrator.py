@@ -118,6 +118,8 @@ class Orchestrator:
         try:
             if item.attempt:
                 return Result(item.recipe.id, "dry_run", f"Would resume from {item.attempt.stage}")
+            if item.retry_of:
+                return Result(item.recipe.id, "dry_run", "Would start a new attempt (no text call: reuses the saved description)")
             try:
                 description = validate_description(self.describer.describe(item.recipe))
             finally:

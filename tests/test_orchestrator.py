@@ -40,11 +40,10 @@ def seed(runner, repo, store, recipe, stage):
                     settings=runner.settings, image_key="saved-upload-key")
     if stage in (Stage.GENERATING, Stage.GENERATED, Stage.PROCESSED, Stage.PRESIGNED, Stage.UPLOADED):
         store.put(a.original_storage_key, png())
-        a = repo.update(a.id, a.lease_token, original_key=a.original_storage_key)
     if stage in (Stage.PROCESSED, Stage.PRESIGNED, Stage.UPLOADED):
         jpeg = process(png())
         store.put(a.jpeg_storage_key, jpeg.data)
-        a = repo.update(a.id, a.lease_token, jpeg_key=a.jpeg_storage_key,
+        a = repo.update(a.id, a.lease_token,
                         jpeg_sha256=jpeg.sha256, jpeg_length=jpeg.length)
     repo.release(a.id, a.lease_token)
     return a
@@ -147,7 +146,7 @@ def test_upload_failure_reuses_jpeg_and_requests_new_key(tmp_path):
     assert a.last_successful_stage == Stage.PRESIGNED
     assert "https://" not in a.error_message
     assert "secret-placeholder" not in a.error_message
-    saved = store.get(a.jpeg_key)
+    saved = store.get(a.jpeg_storage_key)
     upload.upload.side_effect = None
     second = runner.run(Options(retry_failures=True, max_images=0))
     assert second.exit_code == 0
@@ -304,3 +303,15 @@ def test_batched_describer_prefetches_only_what_the_image_cap_allows(tmp_path):
     runner.run(Options(limit=3, max_images=2))
     (prefetched,), keywords = batched.prefetch.call_args
     assert len(prefetched) == 2 and keywords == {"persist": True}
+
+
+def test_dry_run_of_a_retry_makes_no_text_call(tmp_path):
+    runner, repo, store, describe, generate, upload, recipes = setup(tmp_path)
+    a = repo.claim(Work(recipes[0]), "old", 300)
+    repo.update(a.id, a.lease_token, stage=Stage.FAILED, last_successful_stage=Stage.PROMPT_BUILT,
+                description="A described dish.", description_version="v")
+    repo.release(a.id, a.lease_token)
+    result = runner.run(Options(dry_run=True, retry_failures=True, ids=(recipes[0].id,)))
+    assert result.results[0].status == "dry_run" and "new attempt" in result.results[0].detail
+    describe.describe.assert_not_called()
+    generate.generate.assert_not_called()

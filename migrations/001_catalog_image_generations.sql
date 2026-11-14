@@ -40,9 +40,7 @@ CREATE TABLE catalog_image_generations (
     text_usage            jsonb,                                 -- description call(s), incl. repairs and batch share
     image_usage           jsonb,                                 -- image call
 
-    -- Artifacts (relative storage keys, never URLs)
-    original_key          text,
-    jpeg_key              text,
+    -- Artifacts (their storage keys derive from the attempt id: attempts/<id>/original and attempts/<id>/image.jpg)
     jpeg_sha256           text,
     jpeg_length           bigint,
     image_key             text,                                  -- key returned by the presign API for the uploaded image

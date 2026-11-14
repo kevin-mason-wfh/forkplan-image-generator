@@ -111,7 +111,7 @@ class AttemptRunner:
             return
         if not self.services.storage.exists(self.attempt.original_storage_key):
             raise GenerationError("Interrupted generation has no saved original", True)
-        self._advance(Stage.GENERATED, original_key=self.attempt.original_storage_key)
+        self._advance(Stage.GENERATED)
 
     def _generate(self) -> None:
         if self.attempt.stage != Stage.PROMPT_BUILT:
@@ -127,7 +127,7 @@ class AttemptRunner:
         original = self.heartbeat.call(dispatch)
         usage_columns = self._capture_usage("image", services.generator)
         self.heartbeat.call(lambda: services.storage.put(self.attempt.original_storage_key, original))
-        self._advance(Stage.GENERATED, original_key=self.attempt.original_storage_key, **usage_columns)
+        self._advance(Stage.GENERATED, **usage_columns)
 
     def _process_image(self) -> None:
         if self.attempt.stage != Stage.GENERATED:
@@ -137,16 +137,16 @@ class AttemptRunner:
             jpeg = fingerprint(storage.get(attempt.jpeg_storage_key))
             verify(jpeg.data, jpeg.sha256, jpeg.length)
         else:
-            jpeg = self.heartbeat.call(lambda: process(storage.get(attempt.original_key)))
+            jpeg = self.heartbeat.call(lambda: process(storage.get(attempt.original_storage_key)))
             self.heartbeat.call(lambda: storage.put(attempt.jpeg_storage_key, jpeg.data))
-        self._advance(Stage.PROCESSED, jpeg_key=attempt.jpeg_storage_key,
+        self._advance(Stage.PROCESSED,
                       jpeg_sha256=jpeg.sha256, jpeg_length=jpeg.length)
 
     def _publish(self) -> None:
         if self.attempt.stage not in (Stage.PROCESSED, Stage.PRESIGNED):
             return
         services, attempt, recipe = self.services, self.attempt, self.work.recipe
-        data = self.heartbeat.call(lambda: services.storage.get(attempt.jpeg_key))
+        data = self.heartbeat.call(lambda: services.storage.get(attempt.jpeg_storage_key))
         verify(data, attempt.jpeg_sha256, attempt.jpeg_length)
         if services.export_copy:
             # Verified bytes only; idempotent, so resuming here never duplicates.
@@ -172,8 +172,7 @@ class AttemptRunner:
         if self.attempt.stage == Stage.GENERATING and not isinstance(exc, GenerationError):
             # Something other than the image call failed while the call was in flight: keep the original if saved.
             if storage.exists(self.attempt.original_storage_key):
-                changes.update(last_successful_stage=Stage.GENERATED,
-                               original_key=self.attempt.original_storage_key)
+                changes.update(last_successful_stage=Stage.GENERATED)
             else:
                 uncertain = True
         status = Stage.UNCERTAIN if uncertain else Stage.FAILED

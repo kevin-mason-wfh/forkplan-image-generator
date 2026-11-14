@@ -46,6 +46,9 @@ def blocking_status(exc: BaseException) -> int | None:
 
 def blocking_message(exc: BaseException, code: int) -> str:
     service = "OpenAI" if type(exc).__module__.startswith("openai") else "A service"
+    hint = getattr(exc, "hint", "")
+    if hint:  # e.g. a refused service-account login: say why
+        return f"{exc} ({hint}). Check the COGNITO_* settings, then run --retry-failures."
     if code == 429:
         return (f"{service} rate limit or quota reached (HTTP 429). Saved work is kept. Wait a minute, lower "
                 "OPENAI_IMAGE_RPM / OPENAI_TEXT_RPM, or check your quota, then run --retry-failures.")

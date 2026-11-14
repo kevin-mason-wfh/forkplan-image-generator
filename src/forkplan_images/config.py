@@ -5,6 +5,7 @@ from pathlib import Path
 
 from sqlalchemy.engine import make_url
 
+from .auth import CognitoSettings
 from .network import IMAGE_TIMEOUT_SECONDS, require_https
 
 # Deliberately narrower than the API; expand only after checking official documentation.
@@ -21,11 +22,33 @@ DEFAULT_SIZE = "1024x1024"
 DEFAULT_LEASE_SECONDS = 300
 
 
+COGNITO_REQUIRED = ("COGNITO_REGION", "COGNITO_CLIENT_ID", "COGNITO_USERNAME", "COGNITO_PASSWORD")
+
+
+def cognito_settings(env: Mapping[str, str]) -> CognitoSettings | None:
+    """A Cognito service-account login, or None when no COGNITO_* login setting is present."""
+    if not any(env.get(name, "").strip() for name in COGNITO_REQUIRED):
+        return None
+    missing = [name for name in COGNITO_REQUIRED if not env.get(name, "").strip()]
+    if missing:
+        raise ValueError(f"{', '.join(missing)} required when using a Cognito login")
+    region, client_id = env["COGNITO_REGION"].strip(), env["COGNITO_CLIENT_ID"].strip()
+    if not re.fullmatch(r"[a-z]{2}(-[a-z]+)+-\d", region):
+        raise ValueError("COGNITO_REGION must look like eu-west-2")
+    if any(c.isspace() for c in client_id):
+        raise ValueError("COGNITO_CLIENT_ID must not contain whitespace")
+    token_use = env.get("COGNITO_TOKEN_USE", "access").strip().lower() or "access"
+    if token_use not in ("access", "id"):
+        raise ValueError("COGNITO_TOKEN_USE must be access or id")
+    return CognitoSettings(region, client_id, env["COGNITO_USERNAME"].strip(), env["COGNITO_PASSWORD"],
+                           env.get("COGNITO_CLIENT_SECRET", "").strip(), token_use)
+
+
 @dataclass(frozen=True)
 class Config:
     database_url: str = field(repr=False)
     api_base_url: str = field(repr=False)
-    api_token: str = field(repr=False)
+    api_token: str = field(repr=False)  # empty when a Cognito service account is configured
     openai_api_key: str = field(repr=False)
     text_model: str
     image_model: str
@@ -37,6 +60,7 @@ class Config:
     gemini_api_key: str = field(default="", repr=False)
     local_image_dir: Path | None = None
     cost_log_path: Path | None = None
+    cognito: CognitoSettings | None = None
     text_rpm: int = 0  # 0 = no client-side pacing
     image_rpm: int = 0
 
@@ -61,8 +85,14 @@ class Config:
             raise ValueError("DATABASE_URL must be a Postgres URL") from None
         api_base_url = required("API_BASE_URL")
         require_https(api_base_url)
-        for name in ("API_TOKEN", "OPENAI_API_KEY"):
-            if any(c.isspace() for c in required(name)):
+        cognito = cognito_settings(env)
+        api_token = env.get("API_TOKEN", "").strip()
+        if cognito and api_token:
+            raise ValueError("Set either API_TOKEN or the COGNITO_* login settings, not both")
+        if not cognito:
+            api_token = required("API_TOKEN")
+        for name, value in (("API_TOKEN", api_token), ("OPENAI_API_KEY", required("OPENAI_API_KEY"))):
+            if any(c.isspace() for c in value):
                 raise ValueError(f"{name} must not contain whitespace")
         provider = env.get("IMAGE_PROVIDER", "openai").strip() or "openai"
         if provider not in IMAGE_PROVIDERS:
@@ -106,7 +136,7 @@ class Config:
         if seconds <= IMAGE_TIMEOUT_SECONDS:
             raise ValueError(f"LEASE_SECONDS must exceed the {IMAGE_TIMEOUT_SECONDS:.0f}-second image timeout")
         return cls(
-            database_url=database_url, api_base_url=api_base_url, api_token=required("API_TOKEN"),
+            database_url=database_url, api_base_url=api_base_url, api_token=api_token, cognito=cognito,
             openai_api_key=required("OPENAI_API_KEY"), text_model=text_model, image_model=image_model,
             quality=quality, size=size, artifact_dir=Path(env.get("ARTIFACT_DIR", "artifacts")),
             lease_seconds=seconds, image_provider=provider, gemini_api_key=gemini_key,
@@ -128,5 +158,5 @@ class Config:
         url = make_url(self.database_url)
         return tuple(value for value in (
             self.database_url, url.password, url.username, self.api_token, self.openai_api_key,
-            self.gemini_api_key,
+            self.gemini_api_key, *((self.cognito.password, self.cognito.client_secret) if self.cognito else ()),
         ) if value)

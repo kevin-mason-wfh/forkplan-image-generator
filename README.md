@@ -58,7 +58,8 @@ All variables are documented with placeholders in `.env.example`.
 
 | Variable | Policy |
 | --- | --- |
-| `DATABASE_URL`, `API_BASE_URL`, `API_TOKEN`, `OPENAI_API_KEY` | Required |
+| `DATABASE_URL`, `API_BASE_URL`, `OPENAI_API_KEY` | Required |
+| `API_TOKEN` **or** the `COGNITO_*` login settings | Required (one of the two) |
 | `OPENAI_TEXT_MODEL` | Required; `gpt-4o-2024-08-06`, `gpt-5.4-mini` or `gpt-5.4-nano` (GPT-5 models are called without a temperature setting) |
 | `OPENAI_IMAGE_MODEL` | Required when `IMAGE_PROVIDER=openai`; any `gpt-image-*` ID (e.g. `gpt-image-1.5`); `gpt-image-1` is closed upstream |
 | `OPENAI_IMAGE_QUALITY` | OpenAI images only: `low`, `medium`, `high`, `auto`; default `medium` |
@@ -141,6 +142,35 @@ mood words (perfect, glossy, vibrant, tender, savory, comforting, appealing, ric
 repair call that sends the previous text back to be edited; if it still contains a banned word the recipe fails (re-run
 with `--retry-failures`). Recipes are sent to the text model as `<recipe>` blocks, and the image prompt opens with the
 dish name so the image model uses its own knowledge of how the dish is served.
+
+### Signing in to the upload API with a Cognito service account
+
+Instead of a fixed `API_TOKEN` (which expires), the program can sign in as a dedicated Cognito user and renew the token
+itself. Set these (and leave `API_TOKEN` unset; setting both is refused):
+
+```
+COGNITO_REGION=eu-west-2
+COGNITO_CLIENT_ID=<app client id>
+COGNITO_USERNAME=<service account username>
+COGNITO_PASSWORD=<its password>
+# COGNITO_CLIENT_SECRET=<only if the app client has a secret>
+# COGNITO_TOKEN_USE=access     # or "id", whichever token your backend validates (default: access)
+```
+
+It logs in when it first needs a token, keeps it until a minute before it expires, and if the API still answers 401 it
+signs in again and retries once. It does not use refresh tokens, so there is nothing rotating to store and several
+Lambdas can run at once. A refused login stops the run and says why (wrong password, flow not enabled, and so on).
+
+One-time setup on the Cognito side:
+
+1. Create the user and give it a **permanent** password (otherwise login returns a `NEW_PASSWORD_REQUIRED` challenge):
+   `aws cognito-idp admin-create-user ...` then
+   `aws cognito-idp admin-set-user-password --user-pool-id ... --username ... --password ... --permanent`
+2. On the app client, enable the **`ALLOW_USER_PASSWORD_AUTH`** auth flow.
+3. Give the user whatever group or scope your backend needs to allow image presigning for catalog recipes.
+
+In a Lambda, put the password in Secrets Manager (not the function's plain environment) and load it into
+`COGNITO_PASSWORD` when the function starts. Never commit it.
 
 ### Staying under OpenAI rate limits
 

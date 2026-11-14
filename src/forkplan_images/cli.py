@@ -12,6 +12,7 @@ from openai import OpenAI
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 
+from .auth import CognitoLogin
 from .config import Config
 from .descriptions import BatchedDescriber, OpenAIDescriber
 from .generation import GeminiGenerator, OpenAIGenerator
@@ -98,7 +99,8 @@ def execute(config: Config, options: Options, batch_descriptions: bool = False) 
             BatchedDescriber(describer, storage) if batch_descriptions else describer,
             (GeminiGenerator(http, config.gemini_api_key) if config.image_provider == "gemini"
              else OpenAIGenerator(sdk, http)),
-            HttpUploader(http, config.api_base_url, config.api_token),
+            HttpUploader(http, config.api_base_url,
+                         CognitoLogin(http, config.cognito) if config.cognito else config.api_token),
             config.settings, config.lease_seconds, config.secrets,
             export_copy=((lambda recipe, attempt, data: export_local(
                 config.local_image_dir, recipe.name, recipe.id, attempt.attempt_number, data))

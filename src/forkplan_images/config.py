@@ -37,6 +37,8 @@ class Config:
     gemini_api_key: str = field(default="", repr=False)
     local_image_dir: Path | None = None
     cost_log_path: Path | None = None
+    text_rpm: int = 0  # 0 = no client-side pacing
+    image_rpm: int = 0
 
     @classmethod
     def from_environment(cls, env: Mapping[str, str]) -> "Config":
@@ -88,6 +90,15 @@ class Config:
                 raise ValueError(f"{name} unsupported; choose from {', '.join(sorted(allowed))}")
         if provider == "openai" and not IMAGE_MODEL_PATTERN.fullmatch(image_model):
             raise ValueError("OPENAI_IMAGE_MODEL unsupported; expected a gpt-image-* model ID")
+        def per_minute(name: str) -> int:
+            try:
+                value = int(env.get(name, "0").strip() or "0")
+            except ValueError:
+                raise ValueError(f"{name} must be a whole number of requests per minute (0 = no limit)") from None
+            if value < 0:
+                raise ValueError(f"{name} must not be negative")
+            return value
+
         try:
             seconds = int(env.get("LEASE_SECONDS", str(DEFAULT_LEASE_SECONDS)))
         except ValueError:
@@ -99,7 +110,8 @@ class Config:
             openai_api_key=required("OPENAI_API_KEY"), text_model=text_model, image_model=image_model,
             quality=quality, size=size, artifact_dir=Path(env.get("ARTIFACT_DIR", "artifacts")),
             lease_seconds=seconds, image_provider=provider, gemini_api_key=gemini_key,
-            local_image_dir=optional_path("LOCAL_IMAGE_DIR"), cost_log_path=optional_path("COST_LOG_PATH"))
+            local_image_dir=optional_path("LOCAL_IMAGE_DIR"), cost_log_path=optional_path("COST_LOG_PATH"),
+            text_rpm=per_minute("OPENAI_TEXT_RPM"), image_rpm=per_minute("OPENAI_IMAGE_RPM"))
 
     @property
     def cost_log(self) -> Path:

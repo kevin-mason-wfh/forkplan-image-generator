@@ -8,8 +8,9 @@ from .descriptions import DESCRIPTION_VERSION, Describer, validate_description
 from .generation import GenerationError, Generator
 from .heartbeat import Heartbeat
 from .imaging import fingerprint, process, verify
-from .network import auth_failure_status
+from .network import blocking_message, blocking_status
 from .prompts import PROMPT_VERSION, build_prompt
+from .ratelimit import RateLimiter
 from .redaction import redact
 from .repository import Repository, Work
 from .state import Attempt, LeaseLost, Recipe, Stage
@@ -32,13 +33,14 @@ class Services:
     settings: dict[str, Any]
     secrets: tuple[str, ...]
     export_copy: ExportCopy | None = None
+    image_limiter: RateLimiter | None = None
 
 
 @dataclass(frozen=True)
 class Outcome:
     status: str
     detail: str = ""
-    stop_run: bool = False  # the credentials were rejected: continuing would only repeat the failure
+    stop_run: bool = False  # credentials rejected or rate limited: continuing would only repeat the failure
 
 
 class AttemptRunner:
@@ -121,6 +123,9 @@ class AttemptRunner:
         if self.attempt.stage != Stage.PROMPT_BUILT:
             return
         services = self.services
+        if services.image_limiter:
+            # Paced BEFORE the GENERATING marker: a wait must never leave an attempt that looks like it was dispatched.
+            self.heartbeat.call(lambda: services.image_limiter.wait(self.heartbeat.fence))
         self._update(stage=Stage.GENERATING)  # committed before the billed dispatch below
         log.info("%s: requesting the image (can take a minute or two)", self.label)
 
@@ -182,11 +187,9 @@ class AttemptRunner:
                 uncertain = True
         status = Stage.UNCERTAIN if uncertain else Stage.FAILED
         detail = redact(str(exc), self.services.secrets)
-        rejected = auth_failure_status(exc)
+        rejected = blocking_status(exc)
         if rejected:
-            service = "OpenAI" if type(exc).__module__.startswith("openai") else "A service"
-            detail = (f"{service} rejected the credentials (HTTP {rejected}). Check the API token or key in your "
-                      "configuration. Saved work is kept: fix it, then run --retry-failures.")
+            detail = blocking_message(exc, rejected)
         for kind, usage in self.usage.items():  # calls billed this run that no stage write has saved yet
             if not getattr(self.attempt, f"{kind}_usage"):
                 changes[f"{kind}_usage"] = usage

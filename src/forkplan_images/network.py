@@ -30,14 +30,27 @@ def retry_call(operation: Callable[[], T], retryable: Callable[[Exception], bool
     raise AssertionError("unreachable")
 
 
-def auth_failure_status(exc: BaseException) -> int | None:
-    """401/403 from any HTTP or SDK error (or its cause): the credentials are wrong, so every recipe would fail too."""
+BLOCKING_STATUSES = (401, 403, 429)
+
+
+def blocking_status(exc: BaseException) -> int | None:
+    """401/403/429 from any HTTP or SDK error (or its cause). Rejected credentials or an exhausted rate limit would
+    fail every following recipe the same way, so the run stops instead of paying for more work that cannot finish."""
     for error in (exc, exc.__cause__):
         response = getattr(error, "response", None)
         code = getattr(error, "status_code", None) or getattr(response, "status_code", None)
-        if code in (401, 403):
+        if code in BLOCKING_STATUSES:
             return code
     return None
+
+
+def blocking_message(exc: BaseException, code: int) -> str:
+    service = "OpenAI" if type(exc).__module__.startswith("openai") else "A service"
+    if code == 429:
+        return (f"{service} rate limit or quota reached (HTTP 429). Saved work is kept. Wait a minute, lower "
+                "OPENAI_IMAGE_RPM / OPENAI_TEXT_RPM, or check your quota, then run --retry-failures.")
+    return (f"{service} rejected the credentials (HTTP {code}). Check the API token or key in your configuration. "
+            "Saved work is kept: fix it, then run --retry-failures.")
 
 
 def require_https(url: str) -> str:

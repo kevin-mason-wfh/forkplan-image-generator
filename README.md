@@ -142,7 +142,23 @@ repair call that sends the previous text back to be edited; if it still contains
 with `--retry-failures`). Recipes are sent to the text model as `<recipe>` blocks, and the image prompt opens with the
 dish name so the image model uses its own knowledge of how the dish is served.
 
-### Rejected credentials (HTTP 401/403)
+### Staying under OpenAI rate limits
+
+Set the limits for your account in `.env` (both optional; `0` or unset means no pacing):
+
+```
+OPENAI_IMAGE_RPM=8    # image requests per minute
+OPENAI_TEXT_RPM=20    # text (description) requests per minute
+```
+
+The program spaces requests evenly (`8` means one every 7.5 seconds, never more than 8 in any minute) and waits **before**
+an image request is recorded as sent, so a wait can never be mistaken for an uncertain request. Waiting keeps the lease alive.
+Use a value a little under your real limit (see the OpenAI limits page for your tier). One run's pace is about 6 images a
+minute, so pacing only slows it when the limit is below that. If OpenAI still answers 429, the run stops
+(like rejected credentials), keeps saved work and tells you to lower the setting or wait and run `--retry-failures`.
+The limiter works inside one run; two runs at the same time each pace themselves, so use a lower value or run one at a time.
+
+### Rejected credentials (HTTP 401/403) and rate limits (429)
 
 If any service (OpenAI, the image provider or your upload API) rejects the credentials, the run **stops immediately**
 instead of trying the next recipe, because every recipe would fail the same way and each would still pay for an image

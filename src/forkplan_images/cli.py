@@ -18,6 +18,7 @@ from .generation import GeminiGenerator, OpenAIGenerator
 from .network import REQUEST_TIMEOUT_SECONDS
 from .orchestrator import Options, Orchestrator, Summary
 from .pricing import CostLedger
+from .ratelimit import RateLimiter
 from .redaction import redact
 from .repository import PostgresRepository
 from .storage import LocalStorage, export_local
@@ -91,7 +92,7 @@ def execute(config: Config, options: Options, batch_descriptions: bool = False) 
         sdk = stack.enter_context(OpenAI(api_key=config.openai_api_key, timeout=REQUEST_TIMEOUT_SECONDS, max_retries=0))
         http = stack.enter_context(httpx.Client(timeout=REQUEST_TIMEOUT_SECONDS, follow_redirects=False, trust_env=False))
         storage = LocalStorage(config.artifact_dir)
-        describer = OpenAIDescriber(sdk, config.text_model)
+        describer = OpenAIDescriber(sdk, config.text_model, RateLimiter(config.text_rpm, "text requests"))
         orchestrator = Orchestrator(
             PostgresRepository(engine, config.secrets), storage,
             BatchedDescriber(describer, storage) if batch_descriptions else describer,
@@ -103,6 +104,7 @@ def execute(config: Config, options: Options, batch_descriptions: bool = False) 
                 config.local_image_dir, recipe.name, recipe.id, attempt.attempt_number, data))
                 if config.local_image_dir else None),
             ledger=CostLedger(config.cost_log),
+            image_limiter=RateLimiter(config.image_rpm, "image requests"),
         )
         return orchestrator.run(options)
 

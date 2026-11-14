@@ -368,11 +368,11 @@ def test_dry_run_stops_on_rejected_credentials(tmp_path):
     assert len(result.results) == 1 and result.stopped_because and result.exit_code == 1
 
 
-def test_auth_failure_status_reads_sdk_http_and_wrapped_errors():
-    from forkplan_images.network import auth_failure_status
-    assert auth_failure_status(_Rejected()) == 401
-    assert auth_failure_status(_http_error(403)) == 403
-    assert auth_failure_status(_http_error(500)) is None and auth_failure_status(ValueError("x")) is None
+def test_blocking_status_reads_sdk_http_and_wrapped_errors():
+    from forkplan_images.network import blocking_status
+    assert blocking_status(_Rejected()) == 401
+    assert blocking_status(_http_error(403)) == 403
+    assert blocking_status(_http_error(500)) is None and blocking_status(ValueError("x")) is None
     wrapped = RuntimeError("generation failed")
     wrapped.__cause__ = _http_error(401)
-    assert auth_failure_status(wrapped) == 401
+    assert blocking_status(wrapped) == 401

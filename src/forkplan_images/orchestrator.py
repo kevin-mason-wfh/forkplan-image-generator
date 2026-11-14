@@ -7,9 +7,10 @@ from .attempt_runner import AttemptRunner, ExportCopy, Services
 from .descriptions import BatchedDescriber, Describer, validate_description
 from .generation import Generator
 from .heartbeat import Heartbeat
-from .network import auth_failure_status
+from .network import blocking_message, blocking_status
 from .pricing import CostLedger, total_cost, total_tokens
 from .prompts import build_prompt
+from .ratelimit import RateLimiter
 from .redaction import redact
 from .repository import Repository, Work
 from .state import Attempt, ClaimConflict, LeaseLost, Stage
@@ -72,12 +73,13 @@ class Orchestrator:
     def __init__(self, repository: Repository, storage: Storage, describer: Describer,
                  generator: Generator, uploader: Uploader, settings: dict[str, Any],
                  lease_seconds: int = 300, secrets: tuple[str, ...] = (),
-                 export_copy: ExportCopy | None = None,
+                 export_copy: ExportCopy | None = None, image_limiter: RateLimiter | None = None,
                  ledger: CostLedger | None = None):
         self.repository, self.storage = repository, storage
         self.describer, self.generator, self.uploader = describer, generator, uploader
         self.settings, self.lease_seconds, self.secrets = settings, lease_seconds, secrets
         self.export_copy = export_copy
+        self.image_limiter = image_limiter
         self.ledger = ledger
 
     def run(self, options: Options) -> Summary:
@@ -154,8 +156,8 @@ class Orchestrator:
             build_prompt(item.recipe, description)
             return Result(item.recipe.id, "dry_run", "Description validated; would generate and upload")
         except Exception as exc:
-            if rejected := auth_failure_status(exc):
-                summary.stopped_because = f"A service rejected the credentials (HTTP {rejected}). Check your keys."
+            if blocked := blocking_status(exc):
+                summary.stopped_because = blocking_message(exc, blocked)
             return Result(item.recipe.id, "failed", redact(str(exc), self.secrets))
 
     def _run_item(self, item: Work, options: Options, owner: str, summary: Summary) -> None:
@@ -249,4 +251,4 @@ class Orchestrator:
 
     def _services(self) -> Services:
         return Services(self.repository, self.storage, self.describer, self.generator, self.uploader,
-                        self.settings, self.secrets, self.export_copy)
+                        self.settings, self.secrets, self.export_copy, self.image_limiter)

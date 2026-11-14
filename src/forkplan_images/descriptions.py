@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 from .network import REQUEST_TIMEOUT_SECONDS, Checkpoint, retry_call
 from .pricing import TOKEN_KEYS, build_usage, estimate_cost
 from .prompts import load_prompt
+from .ratelimit import RateLimiter
 from .state import Recipe
 from .storage import Storage
 
@@ -110,19 +111,26 @@ def _even_share(usage: dict | None, parts: int) -> dict | None:
 
 
 class OpenAIDescriber:
-    def __init__(self, client: OpenAI, model: str):
+    def __init__(self, client: OpenAI, model: str, limiter: RateLimiter | None = None):
         self.client = client.with_options(timeout=REQUEST_TIMEOUT_SECONDS, max_retries=0)
         self.model = model
+        self.limiter = limiter
         self.last_usage: dict | None = None
 
     def _request(self, instructions: str, payload: str, text_format: type[BaseModel],
                  checkpoint: Checkpoint | None):
         # GPT-5 reasoning models do not accept a temperature setting.
         sampling = {} if self.model.startswith("gpt-5") else {"temperature": 0.2}
-        response = retry_call(
-            lambda: self.client.responses.parse(
+
+        def send():
+            if self.limiter:
+                self.limiter.wait(checkpoint)
+            return self.client.responses.parse(
                 model=self.model, instructions=instructions, input=payload, text_format=text_format, **sampling,
-            ),
+            )
+
+        response = retry_call(
+            send,
             # 429 is deliberately not retried: an immediate retry is also rate limited and consumes more quota.
             lambda exc: isinstance(exc, APIConnectionError) or (
                 isinstance(exc, APIStatusError) and (exc.status_code == 408 or exc.status_code >= 500)),

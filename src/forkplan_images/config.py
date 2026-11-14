@@ -48,7 +48,7 @@ def cognito_settings(env: Mapping[str, str]) -> CognitoSettings | None:
 class Config:
     database_url: str = field(repr=False)
     api_base_url: str = field(repr=False)
-    api_token: str = field(repr=False)  # empty when a Cognito service account is configured
+    api_token: str = field(repr=False)  # may be empty when a Cognito service account is configured
     openai_api_key: str = field(repr=False)
     text_model: str
     image_model: str
@@ -87,9 +87,7 @@ class Config:
         require_https(api_base_url)
         cognito = cognito_settings(env)
         api_token = env.get("API_TOKEN", "").strip()
-        if cognito and api_token:
-            raise ValueError("Set either API_TOKEN or the COGNITO_* login settings, not both")
-        if not cognito:
+        if not cognito:  # with both set, the fixed token is tried first and the login is the backup
             api_token = required("API_TOKEN")
         for name, value in (("API_TOKEN", api_token), ("OPENAI_API_KEY", required("OPENAI_API_KEY"))):
             if any(c.isspace() for c in value):

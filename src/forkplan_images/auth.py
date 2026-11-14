@@ -105,3 +105,18 @@ class CognitoLogin:
                              "have a permanent password (aws cognito-idp admin-set-user-password --permanent)")
         self._token = result["IdToken" if s.token_use == "id" else "AccessToken"]
         self._expires_at = self.clock() + max(int(result.get("ExpiresIn", 3600)) - EXPIRY_MARGIN_SECONDS, 0)
+
+
+class TokenWithLoginFallback:
+    """Uses the fixed token until the API rejects it, then signs in with the service account and stays signed in."""
+
+    def __init__(self, fixed: StaticToken, login: CognitoLogin):
+        self.fixed, self.login = fixed, login
+        self.using_login = False
+
+    def token(self) -> str:
+        return self.login.token() if self.using_login else self.fixed.token()
+
+    def refresh(self) -> str:
+        self.using_login = True
+        return self.login.refresh()

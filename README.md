@@ -59,7 +59,7 @@ All variables are documented with placeholders in `.env.example`.
 | Variable | Policy |
 | --- | --- |
 | `DATABASE_URL`, `API_BASE_URL`, `OPENAI_API_KEY` | Required |
-| `API_TOKEN` **or** the `COGNITO_*` login settings | Required (one of the two) |
+| `API_TOKEN` and/or the `COGNITO_*` login settings | At least one of the two |
 | `OPENAI_TEXT_MODEL` | Required; `gpt-4o-2024-08-06`, `gpt-5.4-mini` or `gpt-5.4-nano` (GPT-5 models are called without a temperature setting) |
 | `OPENAI_IMAGE_MODEL` | Required when `IMAGE_PROVIDER=openai`; any `gpt-image-*` ID (e.g. `gpt-image-1.5`); `gpt-image-1` is closed upstream |
 | `OPENAI_IMAGE_QUALITY` | OpenAI images only: `low`, `medium`, `high`, `auto`; default `medium` |
@@ -145,8 +145,8 @@ dish name so the image model uses its own knowledge of how the dish is served.
 
 ### Signing in to the upload API with a Cognito service account
 
-Instead of a fixed `API_TOKEN` (which expires), the program can sign in as a dedicated Cognito user and renew the token
-itself. Set these (and leave `API_TOKEN` unset; setting both is refused):
+Instead of (or as a backup for) a fixed `API_TOKEN`, which expires, the program can sign in as a dedicated Cognito user
+and renew the token itself. Set these:
 
 ```
 COGNITO_REGION=eu-west-2
@@ -157,7 +157,8 @@ COGNITO_PASSWORD=<its password>
 # COGNITO_TOKEN_USE=access     # or "id", whichever token your backend validates (default: access)
 ```
 
-It logs in when it first needs a token, keeps it until a minute before it expires, and if the API still answers 401 it
+**Both set:** `API_TOKEN` is used first. If the API rejects it, the program signs in with the service account and stays on
+that login for the rest of the run. **Only `COGNITO_*` set:** it logs in when it first needs a token, keeps it until a minute before it expires, and if the API still answers 401 it
 signs in again and retries once. It does not use refresh tokens, so there is nothing rotating to store and several
 Lambdas can run at once. A refused login stops the run and says why (wrong password, flow not enabled, and so on).
 

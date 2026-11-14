@@ -10,7 +10,7 @@ import respx
 from test_cli_config import environment
 from test_orchestrator import setup
 
-from forkplan_images.auth import CognitoLogin, CognitoSettings, LoginError, StaticToken
+from forkplan_images.auth import CognitoLogin, CognitoSettings, LoginError, StaticToken, TokenWithLoginFallback
 from forkplan_images.config import Config
 from forkplan_images.orchestrator import Options
 from forkplan_images.uploads import HttpUploader
@@ -141,7 +141,6 @@ def test_cognito_mode_needs_no_api_token_and_hides_its_secrets():
 
 
 @pytest.mark.parametrize("change,message", [
-    ({"API_TOKEN": "also-set"}, "not both"),
     ({"COGNITO_PASSWORD": ""}, "COGNITO_PASSWORD"),
     ({"COGNITO_REGION": "london"}, "COGNITO_REGION"),
     ({"COGNITO_TOKEN_USE": "refresh"}, "COGNITO_TOKEN_USE"),
@@ -155,3 +154,39 @@ def test_without_cognito_settings_the_api_token_is_still_required():
     env = {k: v for k, v in environment().items() if k != "API_TOKEN"}
     with pytest.raises(ValueError, match="API_TOKEN"):
         Config.from_environment(env)
+
+
+@respx.mock
+def test_fixed_token_is_used_first_and_the_login_takes_over_after_a_rejection():
+    resource_id = uuid4()
+    api = respx.post(f"https://api.example.test/v1/catalog/recipes/{resource_id}/image/presign").mock(
+        side_effect=[httpx.Response(200, json=PRESIGN), httpx.Response(401), httpx.Response(200, json=PRESIGN),
+                     httpx.Response(200, json=PRESIGN)])
+    login = respx.post(COGNITO).mock(side_effect=[login_response("from-login")])
+    with httpx.Client() as client:
+        auth = TokenWithLoginFallback(StaticToken("fixed"), CognitoLogin(client, SETTINGS))
+        uploader = HttpUploader(client, "https://api.example.test", auth)
+        uploader.presign(resource_id, "a.jpg", 5)   # the fixed token works: no login at all
+        assert login.call_count == 0
+        uploader.presign(resource_id, "b.jpg", 5)   # rejected: sign in and retry
+        uploader.presign(resource_id, "c.jpg", 5)   # stays on the login token, no second login
+    assert [c.request.headers["Authorization"] for c in api.calls] == [
+        "Bearer fixed", "Bearer fixed", "Bearer from-login", "Bearer from-login"]
+    assert login.call_count == 1
+
+
+def test_both_settings_are_accepted_together():
+    config = Config.from_environment(cognito_environment(API_TOKEN="fixed-token"))
+    assert config.api_token == "fixed-token" and config.cognito is not None
+    assert "fixed-token" in config.secrets and "pw with spaces" in config.secrets
+
+
+def test_cli_picks_the_right_auth_for_the_configuration():
+    import httpx as _httpx
+
+    from forkplan_images.cli import api_auth
+    with _httpx.Client() as client:
+        assert api_auth(client, Config.from_environment(environment())) == "placeholder-api"
+        assert isinstance(api_auth(client, Config.from_environment(cognito_environment())), CognitoLogin)
+        both = api_auth(client, Config.from_environment(cognito_environment(API_TOKEN="t")))
+        assert isinstance(both, TokenWithLoginFallback)

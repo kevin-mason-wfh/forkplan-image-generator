@@ -12,7 +12,7 @@ from openai import OpenAI
 from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 
-from .auth import CognitoLogin
+from .auth import CognitoLogin, StaticToken, TokenWithLoginFallback
 from .config import Config
 from .descriptions import BatchedDescriber, OpenAIDescriber
 from .generation import GeminiGenerator, OpenAIGenerator
@@ -76,6 +76,14 @@ def configure_logging(level: str) -> None:
     logger.propagate = False
 
 
+def api_auth(http: httpx.Client, config: Config):
+    """API_TOKEN, a Cognito service-account login, or both (the token first, the login as its backup)."""
+    if not config.cognito:
+        return config.api_token
+    login = CognitoLogin(http, config.cognito)
+    return TokenWithLoginFallback(StaticToken(config.api_token), login) if config.api_token else login
+
+
 def execute(config: Config, options: Options, batch_descriptions: bool = False) -> Summary:
     # SDK HTTP logging can expose URLs; only our redacted summaries are emitted.
     for name in ("openai", "httpx", "httpcore", "sqlalchemy"):
@@ -100,7 +108,7 @@ def execute(config: Config, options: Options, batch_descriptions: bool = False) 
             (GeminiGenerator(http, config.gemini_api_key) if config.image_provider == "gemini"
              else OpenAIGenerator(sdk, http)),
             HttpUploader(http, config.api_base_url,
-                         CognitoLogin(http, config.cognito) if config.cognito else config.api_token),
+                         api_auth(http, config)),
             config.settings, config.lease_seconds, config.secrets,
             export_copy=((lambda recipe, attempt, data: export_local(
                 config.local_image_dir, recipe.name, recipe.id, attempt.attempt_number, data))

@@ -1,10 +1,25 @@
 -- Image generation tracking for the forkplan-images CLI. Apply once, explicitly (never from the application), with a role
 -- that can create tables and views. Catalog tables are only read by the application; this is the only table it writes.
 -- Rollback: DROP VIEW catalog_image_generation_costs; DROP TABLE catalog_image_generations;
+--           DROP FUNCTION catalog_image_usage_is_valid(jsonb);
 --
 -- One row per generation attempt. An attempt moves forward through `stage`; `last_successful_stage` survives errors so a
 -- failed attempt can resume. Attempts are leased (lease_* columns) so only one worker advances an attempt at a time.
+-- A redo, or a retry of a failure that cannot resume in place, is a NEW row pointing at the earlier one
+-- (retry_of_attempt_id); earlier rows keep their outcome. The latest attempt of a recipe decides what happens next.
 BEGIN;
+
+-- Usage JSON is validated because the cost view casts its fields: token counts are whole numbers, cost_usd is a
+-- number or null. (A missing usage object means the call did not run; cost_usd null means it ran but has no rate.)
+CREATE FUNCTION catalog_image_usage_is_valid(u jsonb) RETURNS boolean LANGUAGE sql IMMUTABLE AS $$
+    SELECT u IS NULL OR (
+        jsonb_typeof(u) = 'object'
+        AND (u->>'input_tokens' IS NULL OR u->>'input_tokens' ~ '^[0-9]+$')
+        AND (u->>'output_text_tokens' IS NULL OR u->>'output_text_tokens' ~ '^[0-9]+$')
+        AND (u->>'output_image_tokens' IS NULL OR u->>'output_image_tokens' ~ '^[0-9]+$')
+        AND (u->>'reasoning_tokens' IS NULL OR u->>'reasoning_tokens' ~ '^[0-9]+$')
+        AND (u->>'cost_usd' IS NULL OR u->>'cost_usd' ~ '^[0-9]+([.][0-9]+)?$'))
+$$;
 
 CREATE TABLE catalog_image_generations (
     id                    uuid PRIMARY KEY,
@@ -36,7 +51,7 @@ CREATE TABLE catalog_image_generations (
     error_type            text,
     error_message         text,                                  -- redacted before it is written
     retry_count           integer     NOT NULL DEFAULT 0,
-    superseded_by         uuid REFERENCES catalog_image_generations(id) DEFERRABLE INITIALLY DEFERRED,
+    retry_of_attempt_id   uuid REFERENCES catalog_image_generations(id),  -- the attempt this one redoes or retries
     redo_note             text,
 
     created_at            timestamptz NOT NULL DEFAULT now(),
@@ -54,24 +69,24 @@ CREATE TABLE catalog_image_generations (
     CONSTRAINT catalog_image_generations_stage_check CHECK (stage IN (
         'selected', 'described', 'prompt_built', 'generating', 'generated',
         'processed', 'presigned', 'uploaded', 'completed', 'failed',
-        'generation_uncertain', 'retired')),
+        'generation_uncertain', 'abandoned')),
     CONSTRAINT catalog_image_generations_last_stage_check CHECK (last_successful_stage IN (
         'selected', 'described', 'prompt_built', 'generated', 'processed',
         'presigned', 'uploaded', 'completed')),
     CONSTRAINT catalog_image_generations_jpeg_length_check CHECK (jpeg_length > 0 AND jpeg_length < 4900000),
-    CONSTRAINT catalog_image_generations_retired_check CHECK ((stage = 'retired') = (superseded_by IS NOT NULL)),
     CONSTRAINT catalog_image_generations_image_key_check CHECK (stage NOT IN ('uploaded', 'completed') OR image_key IS NOT NULL),
     CONSTRAINT catalog_image_generations_lease_consistent CHECK (
         (lease_owner IS NULL) = (lease_token IS NULL) AND (lease_token IS NULL) = (lease_expires_at IS NULL)),
-    CONSTRAINT catalog_image_generations_usage_is_object CHECK (
-        (text_usage IS NULL OR jsonb_typeof(text_usage) = 'object')
-        AND (image_usage IS NULL OR jsonb_typeof(image_usage) = 'object'))
+    CONSTRAINT catalog_image_generations_usage_valid CHECK (
+        catalog_image_usage_is_valid(text_usage) AND catalog_image_usage_is_valid(image_usage))
 );
 
--- At most one in-flight attempt per resource. (Lookups by resource and attempt number use the UNIQUE constraint's index.)
+-- At most one in-flight attempt per resource. An uncertain attempt (the image request may have been billed) keeps the
+-- resource reserved until it is released. (Lookups by resource and attempt number use the UNIQUE constraint's index.)
 CREATE UNIQUE INDEX catalog_image_generations_one_active
     ON catalog_image_generations (resource_type, resource_id)
-    WHERE stage IN ('selected', 'described', 'prompt_built', 'generating', 'generated', 'processed', 'presigned', 'uploaded');
+    WHERE stage IN ('selected', 'described', 'prompt_built', 'generating', 'generated', 'processed', 'presigned', 'uploaded',
+                    'generation_uncertain');
 
 -- The candidate scan: open or failed attempts, oldest first.
 CREATE INDEX catalog_image_generations_open_by_age
@@ -83,8 +98,10 @@ COMMENT ON COLUMN catalog_image_generations.text_usage IS
 COMMENT ON COLUMN catalog_image_generations.image_usage IS
     'Image call, same shape. cost_usd is an estimate from the rates snapshot; tokens are authoritative.';
 
--- Tokens and estimated cost per attempt, for reporting. Example:
---   SELECT date_trunc('day', completed_at) AS day, count(*), sum(total_tokens), sum(total_cost_usd)
+-- Tokens and estimated cost per attempt, for reporting. total_cost_usd counts known costs only: when unpriced_calls > 0
+-- a call ran but had no rate, so the true cost is higher. A call that did not run (e.g. a redo reusing the description)
+-- has no usage and is not counted as unpriced. Example:
+--   SELECT date_trunc('day', completed_at) AS day, count(*), sum(total_tokens), sum(total_cost_usd), sum(unpriced_calls)
 --   FROM catalog_image_generation_costs WHERE stage = 'completed' GROUP BY 1 ORDER BY 1;
 CREATE VIEW catalog_image_generation_costs AS
 SELECT
@@ -101,7 +118,9 @@ SELECT
       + COALESCE((image_usage->>'output_image_tokens')::bigint, 0)  AS total_tokens,
     (text_usage->>'cost_usd')::numeric  AS text_cost_usd,
     (image_usage->>'cost_usd')::numeric AS image_cost_usd,
-    COALESCE((text_usage->>'cost_usd')::numeric, 0) + COALESCE((image_usage->>'cost_usd')::numeric, 0) AS total_cost_usd
+    COALESCE((text_usage->>'cost_usd')::numeric, 0) + COALESCE((image_usage->>'cost_usd')::numeric, 0) AS total_cost_usd,
+    (text_usage IS NOT NULL AND text_usage->>'cost_usd' IS NULL)::int
+      + (image_usage IS NOT NULL AND image_usage->>'cost_usd' IS NULL)::int  AS unpriced_calls
 FROM catalog_image_generations;
 
 COMMIT;

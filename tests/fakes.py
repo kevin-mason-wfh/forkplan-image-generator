@@ -5,7 +5,7 @@ from uuid import uuid4
 
 from forkplan_images.redaction import redact
 from forkplan_images.repository import Work, sanitize_changes
-from forkplan_images.state import ACTIVE_STAGES, Attempt, ClaimConflict, LeaseLost, Stage
+from forkplan_images.state import ACTIVE_STAGES, RESUMABLE_AFTER_FAILURE, Attempt, ClaimConflict, LeaseLost, Stage
 
 
 class MemoryRepository:
@@ -19,23 +19,41 @@ class MemoryRepository:
 
     def candidates(self, limit, ids=(), include_failed=False):
         with self.lock:
-            attempts = [
-                a for a in self.attempts.values()
-                if (a.stage in ACTIVE_STAGES or (include_failed and a.stage == Stage.FAILED))
-                and not self.held(a) and (not ids or a.resource_id in ids)
-            ]
-            work = [Work(self.recipes[a.resource_id], deepcopy(a)) for a in attempts]
+            work = []
+            for a in self.attempts.values():
+                if self.held(a) or (ids and a.resource_id not in ids):
+                    continue
+                recipe = self.recipes[a.resource_id]
+                if a.stage in ACTIVE_STAGES:
+                    work.append(Work(recipe, deepcopy(a)))
+                elif include_failed and a.stage == Stage.FAILED and self.latest(a.resource_id) is a:
+                    if a.last_successful_stage in RESUMABLE_AFTER_FAILURE:
+                        work.append(Work(recipe, deepcopy(a)))
+                    else:
+                        work.append(Work(recipe, retry_of=deepcopy(a)))
             work += [
                 Work(r) for r in self.recipes.values()
                 if (not ids or r.id in ids) and not r.image_key
-                and r.status in ("PUBLISHED", "DRAFT")
-                and not any(a.resource_id == r.id and a.stage != Stage.RETIRED
-                            for a in self.attempts.values())
+                and r.status in ("PUBLISHED", "DRAFT") and self.latest(r.id) is None
             ]
             return work[:limit]
 
+    def latest(self, resource_id):
+        found = [a for a in self.attempts.values() if a.resource_id == resource_id]
+        return max(found, key=lambda a: a.attempt_number) if found else None
+
     def held(self, a):
         return a.lease_expires_at is not None and a.lease_expires_at > self.clock()
+
+    def _new_attempt(self, resource_id, retry_of=None, note=None):
+        latest = self.latest(resource_id)
+        a = Attempt(resource_id, attempt_number=latest.attempt_number + 1 if latest else 1,
+                    retry_of_attempt_id=retry_of.id if retry_of else None,
+                    description=retry_of.description if retry_of else None,
+                    description_version=retry_of.description_version if retry_of else None,
+                    redo_note=redact(note, self.secrets) if note else None)
+        self.attempts[a.id] = a
+        return a
 
     def claim(self, work, owner, seconds):
         with self.lock:
@@ -44,15 +62,17 @@ class MemoryRepository:
                 if self.held(a) or a.stage != work.attempt.stage:
                     raise ClaimConflict("Already claimed")
                 if a.stage == Stage.FAILED:
+                    if a.last_successful_stage not in RESUMABLE_AFTER_FAILURE:
+                        raise ClaimConflict("Failed before the image was saved")
                     a.stage = a.last_successful_stage
                     a.retry_count += 1
                     a.error_type = a.error_message = None
             else:
-                if any(a.resource_id == work.recipe.id and a.stage != Stage.RETIRED
-                       for a in self.attempts.values()):
+                latest = self.latest(work.recipe.id)
+                expected = work.retry_of.id if work.retry_of else None
+                if (latest.id if latest else None) != expected or (latest and latest.stage != Stage.FAILED):
                     raise ClaimConflict("Duplicate")
-                a = Attempt(work.recipe.id)
-                self.attempts[a.id] = a
+                a = self._new_attempt(work.recipe.id, work.retry_of)
             a.lease_owner, a.lease_token = owner, uuid4()
             a.lease_expires_at = self.clock() + seconds
             self.writes.append(("claim", a.id))
@@ -60,19 +80,25 @@ class MemoryRepository:
 
     def redo(self, resource_id, owner, seconds, note):
         with self.lock:
-            previous = [a for a in self.attempts.values()
-                        if a.resource_id == resource_id and a.stage != Stage.RETIRED]
-            old = max(previous, key=lambda a: a.attempt_number) if previous else None
+            old = self.latest(resource_id)
             if old and self.held(old):
                 raise ClaimConflict("Valid lease")
-            a = Attempt(resource_id, attempt_number=old.attempt_number + 1 if old else 1,
-                        redo_note=redact(note, self.secrets) if note else None)
-            if old:
-                old.stage, old.superseded_by = Stage.RETIRED, a.id
+            if old and old.stage == Stage.UNCERTAIN:
+                raise ClaimConflict("Redo refused: uncertain")
+            if old and old.stage in ACTIVE_STAGES:
+                old.stage = Stage.ABANDONED
                 old.lease_token = old.lease_owner = old.lease_expires_at = None
-            self.attempts[a.id] = a
+            a = self._new_attempt(resource_id, old, note)
             return Work(self.recipes[resource_id], self.claim(Work(self.recipes[resource_id], a),
                                                            owner, seconds))
+
+    def release_uncertain(self, resource_id):
+        with self.lock:
+            old = self.latest(resource_id)
+            if not old or old.stage != Stage.UNCERTAIN or self.held(old):
+                raise ClaimConflict("No uncertain attempt to release")
+            old.stage = Stage.ABANDONED
+            old.lease_token = old.lease_owner = old.lease_expires_at = None
 
     def owned(self, attempt_id, token):
         a = self.attempts[attempt_id]

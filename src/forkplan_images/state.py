@@ -16,13 +16,16 @@ class Stage(StrEnum):
     COMPLETED = "completed"
     FAILED = "failed"
     UNCERTAIN = "generation_uncertain"
-    RETIRED = "retired"
+    ABANDONED = "abandoned"  # unfinished attempt set aside by a redo, or an uncertain one that was released
 
 
 # Stages where an attempt still has work to do (a lease may be held), in pipeline order.
 ACTIVE_STAGES = (Stage.SELECTED, Stage.DESCRIBED, Stage.PROMPT_BUILT, Stage.GENERATING, Stage.GENERATED,
                  Stage.PROCESSED, Stage.PRESIGNED, Stage.UPLOADED)
 # Stages that are safe resume points after a failure (GENERATING is not: the image call may have been billed).
+# A failed attempt resumes in place only from here on: the next step reuses saved work. Failing earlier would need a
+# fresh (paid) image call, so that becomes a new attempt instead.
+RESUMABLE_AFTER_FAILURE = (Stage.GENERATED, Stage.PROCESSED, Stage.PRESIGNED, Stage.UPLOADED)
 SUCCESSFUL_STAGES = tuple(s for s in (*ACTIVE_STAGES, Stage.COMPLETED) if s != Stage.GENERATING)
 
 
@@ -68,7 +71,7 @@ class Attempt:
     error_type: str | None = None
     error_message: str | None = None
     retry_count: int = 0
-    superseded_by: UUID | None = None
+    retry_of_attempt_id: UUID | None = None
     redo_note: str | None = None
     lease_owner: str | None = None
     lease_token: UUID | None = None

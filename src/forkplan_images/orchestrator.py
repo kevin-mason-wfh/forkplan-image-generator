@@ -27,10 +27,13 @@ class Options:
     retry_failures: bool = False
     redo: UUID | None = None
     note: str | None = None
+    release_uncertain: UUID | None = None
 
     def __post_init__(self) -> None:
         if self.limit < 0 or self.max_images < 0:
             raise ValueError("Caps must be nonnegative")
+        if self.release_uncertain and (self.redo or self.dry_run or self.ids):
+            raise ValueError("Release cannot be combined with redo, dry run or IDs")
         if self.redo and (self.dry_run or self.ids):
             raise ValueError("Redo cannot be combined with dry run or IDs")
         if self.note and not self.redo:
@@ -91,6 +94,14 @@ class Orchestrator:
 
     def _select_work(self, options: Options, owner: str, summary: Summary) -> list[Work]:
         """Resumable and fresh recipes, or the single redo attempt. A refused redo is reported and yields no work."""
+        if options.release_uncertain:
+            try:
+                self.repository.release_uncertain(options.release_uncertain)
+                summary.results.append(Result(options.release_uncertain, "released",
+                                              "Uncertain attempt released; it can now be redone"))
+            except ClaimConflict as exc:
+                summary.results.append(Result(options.release_uncertain, "failed", str(exc)))
+            return []
         if not options.redo:
             return self.repository.candidates(options.limit, options.ids, options.retry_failures)
         if not options.max_images:
@@ -98,8 +109,8 @@ class Orchestrator:
             return []
         try:
             return [self.repository.redo(options.redo, owner, self.lease_seconds, options.note)]
-        except ClaimConflict:
-            summary.results.append(Result(options.redo, "failed", "Redo refused: valid lease"))
+        except ClaimConflict as exc:
+            summary.results.append(Result(options.redo, "failed", str(exc)))
             return []
 
     def _dry_run(self, item: Work, summary: Summary) -> Result:
@@ -159,7 +170,9 @@ class Orchestrator:
         """Batch the descriptions this run will need, up to the image cap, in as few requests as possible."""
         if not isinstance(self.describer, BatchedDescriber):
             return
-        pending = [w.recipe for w in work if w.attempt is None or w.attempt.stage == Stage.SELECTED]
+        pending = [w.recipe for w in work
+                   if (w.attempt is None and not (w.retry_of and w.retry_of.description))
+                   or (w.attempt and w.attempt.stage == Stage.SELECTED and not w.attempt.description)]
         cap = None if options.dry_run else options.max_images
         try:
             self.describer.prefetch(pending[:cap], persist=not options.dry_run)

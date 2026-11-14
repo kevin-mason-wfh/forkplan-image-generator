@@ -26,21 +26,50 @@ def test_claim_expiry_and_token_fencing():
     assert repo.attempts[first.id].lease_expires_at == 31
 
 
-@pytest.mark.parametrize("stage", [Stage.FAILED, Stage.UNCERTAIN, Stage.COMPLETED])
-def test_terminal_exclusion_retry_and_redo(stage):
+@pytest.mark.parametrize("stage", [Stage.FAILED, Stage.COMPLETED, Stage.PRESIGNED])
+def test_redo_adds_a_linked_attempt_and_keeps_history(stage):
     recipe = Recipe(uuid4(), "Soup", image_key="")
     repo = MemoryRepository([recipe])
     a = repo.claim(Work(recipe), "one", 10)
-    repo.update(a.id, a.lease_token, stage=stage)
-    with pytest.raises(ClaimConflict):
+    repo.update(a.id, a.lease_token, stage=stage, description="A described dish.", description_version="v1")
+    with pytest.raises(ClaimConflict):  # lease still held
         repo.redo(recipe.id, "two", 10, None)
     repo.release(a.id, a.lease_token)
-    assert not repo.candidates(10)
-    assert bool(repo.candidates(10, include_failed=True)) == (stage == Stage.FAILED)
+    assert bool(repo.candidates(10)) == (stage == Stage.PRESIGNED)  # unfinished work resumes; the rest is left alone
     next_work = repo.redo(recipe.id, "two", 10, "manual")
-    assert repo.attempts[a.id].superseded_by == next_work.attempt.id
-    assert repo.attempts[a.id].stage == Stage.RETIRED
-    assert next_work.attempt.attempt_number == 2
+    new = next_work.attempt
+    assert new.attempt_number == 2 and new.retry_of_attempt_id == a.id
+    assert new.description == "A described dish." and new.text_usage is None
+    # Only an unfinished attempt is set aside; failed and completed ones keep their outcome.
+    assert repo.attempts[a.id].stage == (Stage.ABANDONED if stage == Stage.PRESIGNED else stage)
+
+
+def test_uncertain_attempt_reserves_the_recipe_until_released():
+    recipe = Recipe(uuid4(), "Soup", image_key="")
+    repo = MemoryRepository([recipe])
+    a = repo.claim(Work(recipe), "one", 10)
+    repo.update(a.id, a.lease_token, stage=Stage.UNCERTAIN)
+    repo.release(a.id, a.lease_token)
+    assert not repo.candidates(10, include_failed=True)
+    with pytest.raises(ClaimConflict):
+        repo.redo(recipe.id, "two", 10, None)
+    repo.release_uncertain(recipe.id)
+    assert repo.attempts[a.id].stage == Stage.ABANDONED
+    assert repo.redo(recipe.id, "two", 10, None).attempt.attempt_number == 2
+
+
+def test_failure_before_the_image_is_saved_starts_a_new_attempt():
+    recipe = Recipe(uuid4(), "Soup")
+    repo = MemoryRepository([recipe])
+    a = repo.claim(Work(recipe), "one", 10)
+    repo.update(a.id, a.lease_token, stage=Stage.FAILED, last_successful_stage=Stage.PROMPT_BUILT,
+                description="A described dish.", description_version="v1")
+    repo.release(a.id, a.lease_token)
+    (work,) = repo.candidates(10, include_failed=True)
+    assert work.attempt is None and work.retry_of.id == a.id  # not resumed in place
+    new = repo.claim(work, "two", 10)
+    assert new.retry_of_attempt_id == a.id and new.attempt_number == 2 and new.description == "A described dish."
+    assert repo.attempts[a.id].stage == Stage.FAILED and repo.attempts[a.id].retry_count == 0
 
 
 def test_retry_keeps_progress_and_clears_errors():

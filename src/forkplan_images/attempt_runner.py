@@ -87,6 +87,10 @@ class AttemptRunner:
         if self.attempt.stage != Stage.SELECTED:
             return
         services = self.services
+        if self.attempt.description and self.attempt.description_version == DESCRIPTION_VERSION:
+            # A retry or redo carries the earlier description: no text call, so no text_usage on this attempt.
+            self._advance(Stage.DESCRIBED, settings=services.settings)
+            return
         try:
             description = self.heartbeat.call(lambda: services.describer.describe(
                 self.work.recipe, checkpoint=self.heartbeat.fence))

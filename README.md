@@ -86,6 +86,7 @@ forkplan-images --ids RECIPE_UUID OTHER_RECIPE_UUID --max-images 2
 forkplan-images --retry-failures --limit 5 --max-images 1
 forkplan-images --limit 10 --max-images 10 --batch-descriptions   # fewer text requests
 forkplan-images --redo RECIPE_UUID --note "Reviewed description; approved a new attempt"
+forkplan-images --release-uncertain RECIPE_UUID   # after checking the provider for an uncertain request
 # Equivalent entry point:
 python -m forkplan_images --help
 ```
@@ -162,7 +163,7 @@ Every description and image call records the provider's token counts and an esti
 
 * **Tokens are authoritative; dollars are estimates** from `src/forkplan_images/pricing.py`. Confirm the rates on the provider pricing
   pages and edit `RATES` when they change. A model with no known rate, or an unpriced token class, records `cost_usd: null` and is
-  counted as "unpriced" in the run total.
+  counted as "unpriced" in the run total and in the view's `unpriced_calls` column (`total_cost_usd` then covers known costs only; a call that did not run has no usage and is not unpriced).
 * **Reasoning tokens** (GPT-5 text models) are recorded separately for visibility but are already part of the output tokens and the cost;
   they are not counted twice in `total_tokens`.
 * **Batched descriptions:** one request covers up to 10 recipes, so its tokens and cost are split evenly across them. Descriptions loaded
@@ -181,18 +182,23 @@ selected → described → prompt_built → generating → generated
 ```
 
 `last_successful_stage` survives errors separately from `stage`. `failed`,
-`generation_uncertain`, `completed`, and `retired` are terminal. Fresh selection
-requires a missing/empty recipe image and PUBLISHED/DRAFT status, and excludes
-**every non-retired attempt**, even if the recipe image is subsequently cleared.
-Resume comes from tracking state, not the recipe's possibly premature image key.
+`failed`, `generation_uncertain`, `completed`, and `abandoned` are terminal. Fresh selection
+requires a missing/empty recipe image, PUBLISHED/DRAFT status, and **no attempt at all**, even if the recipe
+image is subsequently cleared. Resume comes from tracking state, not the recipe's possibly premature image key.
+`completed` means the JPEG was uploaded to storage; publishing it on the recipe is the main system's job.
 
-* `--retry-failures` reopens the same failed attempt after its last successful
-  stage, clears errors and increments the retry count. It never reopens uncertain
-  attempts.
-* `--redo ID` atomically retires the previous non-retired attempt, records its
-  successor, and creates a new attempt with a higher number. It also works for a
-  recipe with an existing image and no tracking history. A valid lease refuses
-  redo. All history and originals are retained.
+History is never rewritten: a redo or retry is a **new row** whose `retry_of_attempt_id` points at the earlier one,
+and the earlier row keeps its outcome (a completed attempt stays completed). The latest attempt decides what happens next.
+
+* `--retry-failures` looks at recipes whose **latest** attempt failed. If it failed after the image was saved
+  (`generated` or later) the same attempt resumes, clears the error and increments `retry_count`. If it failed earlier,
+  the next step would be a new paid image request, so a **new attempt** is created instead (it reuses the saved description).
+* `--redo ID` creates a new attempt using the CLI's current settings and links it to the previous one. The description is
+  reused (no text call, no text usage) when it came from the current description version. An unfinished attempt with an
+  expired lease is set aside as `abandoned`; a valid lease refuses redo. It also works for a recipe with an existing image
+  and no tracking history.
+* `generation_uncertain` (the image request may have been billed) reserves the recipe: it is never retried and `--redo`
+  is refused. After checking the provider, run `--release-uncertain RECIPE_ID` to set it aside (stage `abandoned`), then redo.
 * A partial unique index enforces one **active** attempt per resource.
   Transaction-scoped advisory locks serialize fresh claims and redo without
   locking or writing catalog rows. Colliding claims are skipped.

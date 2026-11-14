@@ -40,7 +40,9 @@ def parser() -> argparse.ArgumentParser:
                         help="Log progress (stage changes, skips, failures) to stderr; secrets are redacted")
     result.add_argument("--retry-failures", action="store_true",
                         help="Reopen failed attempts from saved progress; never retry uncertain attempts")
-    result.add_argument("--redo", type=UUID, help="Retire previous attempt and regenerate exactly one recipe")
+    result.add_argument("--redo", type=UUID, help="Start a new attempt for exactly one recipe (earlier attempts stay as history)")
+    result.add_argument("--release-uncertain", type=UUID, metavar="RECIPE_ID",
+                        help="After checking the provider, free a recipe whose image request outcome is uncertain so it can be redone")
     result.add_argument("--note", help="Optional redo reason (requires --redo)")
     return result
 
@@ -95,7 +97,7 @@ def main(argv: list[str] | None = None) -> int:
         options = Options(
             limit=arguments.limit, ids=tuple(arguments.ids), max_images=arguments.max_images,
             dry_run=arguments.dry_run, retry_failures=arguments.retry_failures,
-            redo=arguments.redo, note=arguments.note,
+            redo=arguments.redo, note=arguments.note, release_uncertain=arguments.release_uncertain,
         )
         load_dotenv()
         config = Config.from_environment(os.environ)

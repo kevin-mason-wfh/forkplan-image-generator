@@ -47,9 +47,10 @@ DESCRIPTION_VERSION = "tradition-aware-v2"
 
 INSTRUCTIONS = load_prompt("description_instructions.txt", flatten=False)
 
-# Marketing words the instructions forbid; enforced, not just requested.
+# Marketing words the instructions forbid; enforced, not just requested. Keep this no stricter than the instructions:
+# "juicy" is marketing, but the noun "juices" (a visible pool on the plate) is not.
 STYLE_BLOCKLIST = re.compile(
-    r"\b(perfect(?:ly)?|beautiful(?:ly)?|glisten\w*|gloss\w*|vibrant|succulent|juic\w*|tender|mouth-?watering|"
+    r"\b(perfect(?:ly)?|beautiful(?:ly)?|glisten\w*|gloss\w*|vibrant|succulent|juic(?:y|ier|iest|iness)|tender|mouth-?watering|"
     r"delicious|tasty|savou?ry|flavou?r\w*|aroma\w*|comfort\w*|inviting|appeal\w*|elegant\w*|harmon\w*|"
     r"appetis\w*|appetiz\w*|delectable|indulgen\w*|rich|hearty|fresh|steaming|rustic|lush|decadent|gourmet)\b",
     re.IGNORECASE)

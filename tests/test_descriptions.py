@@ -217,3 +217,11 @@ def test_gpt5_models_are_called_without_temperature():
         client = _client(plain("A plain plate holding the cooked dish."))
         OpenAIDescriber(client, model).describe(Recipe(uuid4(), "Soup"))
         assert ("temperature" in client.responses.parse.call_args.kwargs) is expects_temperature
+
+
+def test_the_noun_juices_is_allowed_but_juicy_is_not():
+    from forkplan_images.descriptions import style_problems
+    plain_text = "A sliced sirloin rests beside a fried egg with a small pool of meat juices on the plate. " * 3
+    assert style_problems(plain_text) == []
+    for marketing in ("juicy", "Juicier", "juiciness", "the juiciest slices"):
+        assert "juic" in " ".join(style_problems(plain_text + f" The {marketing} steak."))

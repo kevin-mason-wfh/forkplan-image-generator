@@ -6,7 +6,7 @@ import pytest
 from fakes import MemoryRepository
 
 from forkplan_images.repository import PostgresRepository, Work
-from forkplan_images.state import Attempt, ClaimConflict, LeaseLost, Recipe, Stage
+from forkplan_images.state import MAX_ATTEMPTS, Attempt, ClaimConflict, LeaseLost, Recipe, Stage
 
 
 def test_claim_expiry_and_token_fencing():
@@ -133,3 +133,28 @@ def test_candidate_queries_only_filter_by_id_when_ids_are_given(ids):
     PostgresRepository(engine).candidates(5, ids)
     assert len(statements) == 2 and all(("POSTCOMPILE_ids" in s) == bool(ids) for s in statements)
     assert all("all_ids" not in s for s in statements)
+
+
+def test_retry_failures_stops_after_the_maximum_attempts_but_redo_still_works():
+    recipe = Recipe(uuid4(), "Soup")
+    repo = MemoryRepository([recipe])
+    work = Work(recipe)
+    for number in range(1, MAX_ATTEMPTS + 1):
+        a = repo.claim(work, "w", 10)
+        assert a.attempt_number == number
+        repo.update(a.id, a.lease_token, stage=Stage.FAILED, last_successful_stage=Stage.PROMPT_BUILT)
+        repo.release(a.id, a.lease_token)
+        candidates = repo.candidates(10, include_failed=True)
+        assert bool(candidates) == (number < MAX_ATTEMPTS)  # the 4th failure is not retried automatically
+        work = candidates[0] if candidates else work
+    assert repo.redo(recipe.id, "admin", 10, None).attempt.attempt_number == MAX_ATTEMPTS + 1
+
+
+def test_in_place_resumes_are_capped_too():
+    recipe = Recipe(uuid4(), "Soup")
+    repo = MemoryRepository([recipe])
+    a = repo.claim(Work(recipe), "w", 10)
+    repo.update(a.id, a.lease_token, stage=Stage.FAILED, last_successful_stage=Stage.PRESIGNED)
+    repo.release(a.id, a.lease_token)
+    repo.attempts[a.id].retry_count = MAX_ATTEMPTS
+    assert repo.candidates(10, include_failed=True) == []

@@ -5,7 +5,15 @@ from uuid import uuid4
 
 from forkplan_images.redaction import redact
 from forkplan_images.repository import Work, sanitize_changes
-from forkplan_images.state import ACTIVE_STAGES, RESUMABLE_AFTER_FAILURE, Attempt, ClaimConflict, LeaseLost, Stage
+from forkplan_images.state import (
+    ACTIVE_STAGES,
+    MAX_ATTEMPTS,
+    RESUMABLE_AFTER_FAILURE,
+    Attempt,
+    ClaimConflict,
+    LeaseLost,
+    Stage,
+)
 
 
 class MemoryRepository:
@@ -26,7 +34,8 @@ class MemoryRepository:
                 recipe = self.recipes[a.resource_id]
                 if a.stage in ACTIVE_STAGES:
                     work.append(Work(recipe, deepcopy(a)))
-                elif include_failed and a.stage == Stage.FAILED and self.latest(a.resource_id) is a:
+                elif (include_failed and a.stage == Stage.FAILED and self.latest(a.resource_id) is a
+                      and a.attempt_number < MAX_ATTEMPTS and a.retry_count < MAX_ATTEMPTS):
                     if a.last_successful_stage in RESUMABLE_AFTER_FAILURE:
                         work.append(Work(recipe, deepcopy(a)))
                     else:

@@ -193,6 +193,8 @@ and the earlier row keeps its outcome (a completed attempt stays completed). The
 * `--retry-failures` looks at recipes whose **latest** attempt failed. If it failed after the image was saved
   (`generated` or later) the same attempt resumes, clears the error and increments `retry_count`. If it failed earlier,
   the next step would be a new paid image request, so a **new attempt** is created instead (it reuses the saved description).
+* Automatic retries are capped: `--retry-failures` skips a recipe once it has 4 attempts (or one attempt has been
+  resumed 4 times). `--redo` is the manual override.
 * `--redo ID` creates a new attempt using the CLI's current settings and links it to the previous one. The description is
   reused (no text call, no text usage) when it came from the current description version. An unfinished attempt with an
   expired lease is set aside as `abandoned`; a valid lease refuses redo. It also works for a recipe with an existing image

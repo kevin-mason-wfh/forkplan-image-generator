@@ -7,7 +7,16 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Connection, Engine
 
 from .redaction import redact
-from .state import ACTIVE_STAGES, RESUMABLE_AFTER_FAILURE, Attempt, ClaimConflict, LeaseLost, Recipe, Stage
+from .state import (
+    ACTIVE_STAGES,
+    MAX_ATTEMPTS,
+    RESUMABLE_AFTER_FAILURE,
+    Attempt,
+    ClaimConflict,
+    LeaseLost,
+    Recipe,
+    Stage,
+)
 
 
 @dataclass(frozen=True)
@@ -78,7 +87,8 @@ class PostgresRepository:
         # A failed attempt is only a candidate while it is the recipe's latest attempt.
         failed_filter = ("OR (stage = 'failed' AND NOT EXISTS (SELECT 1 FROM catalog_image_generations newer "
                          "WHERE newer.resource_type = g.resource_type AND newer.resource_id = g.resource_id "
-                         "AND newer.attempt_number > g.attempt_number))") if include_failed else ""
+                         "AND newer.attempt_number > g.attempt_number) "
+                         "AND g.attempt_number < :max_attempts AND g.retry_count < :max_attempts)") if include_failed else ""
         # The id filter is only added when ids are given: an empty IN list has no type and Postgres rejects uuid = integer.
         attempt_filter, recipe_filter = ("AND resource_id IN :ids", "AND r.id IN :ids") if ids else ("", "")
         id_binding = [bindparam("ids", expanding=True)] if ids else []
@@ -90,7 +100,7 @@ class PostgresRepository:
                   {attempt_filter}
                 ORDER BY created_at, id LIMIT :limit
             """).bindparams(bindparam("stages", expanding=True), *id_binding),
-                {"stages": stages, "limit": limit, **({"ids": ids} if ids else {})}).mappings()
+                {"stages": stages, "limit": limit, "max_attempts": MAX_ATTEMPTS, **({"ids": ids} if ids else {})}).mappings()
             work = []
             for row in attempts:
                 attempt = attempt_from_row(row)

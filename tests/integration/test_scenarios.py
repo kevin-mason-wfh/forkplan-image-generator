@@ -282,3 +282,13 @@ def test_redo_through_the_orchestrator_reuses_the_description_and_costs_no_text(
     with engine.connect() as conn:
         costs = conn.execute(text("SELECT attempt_id, total_tokens FROM catalog_image_generation_costs")).all()
     assert {c.attempt_id: c.total_tokens for c in costs} == {old.id: 3209, new.id: 2009}
+
+
+def test_retry_failures_stops_after_four_attempts_in_postgres(engine, repo, recipe_ids):
+    from forkplan_images.state import MAX_ATTEMPTS
+    previous = None
+    for number in range(1, MAX_ATTEMPTS + 1):
+        previous = insert_attempt(engine, recipe_ids[0], number=number, stage="failed", retry_of_attempt_id=previous)
+        candidates = repo.candidates(10, (recipe_ids[0],), True)
+        assert bool(candidates) == (number < MAX_ATTEMPTS)
+    assert repo.redo(recipe_ids[0], "admin", 60, None).attempt.attempt_number == MAX_ATTEMPTS + 1

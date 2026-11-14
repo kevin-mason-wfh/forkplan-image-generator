@@ -29,6 +29,11 @@ RESUMABLE_AFTER_FAILURE = (Stage.GENERATED, Stage.PROCESSED, Stage.PRESIGNED, St
 SUCCESSFUL_STAGES = tuple(s for s in (*ACTIVE_STAGES, Stage.COMPLETED) if s != Stage.GENERATING)
 
 
+# --retry-failures stops after this many attempts for a recipe (and this many in-place resumes of one attempt).
+# A person can still run --redo.
+MAX_ATTEMPTS = 4
+
+
 class LeaseLost(RuntimeError):
     pass
 

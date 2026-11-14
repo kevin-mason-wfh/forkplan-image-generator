@@ -83,14 +83,32 @@ class Orchestrator:
         if not options.limit:
             return summary
         owner = str(uuid4())
+        log.info("Run started: limit=%d max_images=%d dry_run=%s retry_failures=%s | %s", options.limit,
+                 options.max_images, options.dry_run, options.retry_failures,
+                 ", ".join(f"{k}={v}" for k, v in self.settings.items()))
         work = self._select_work(options, owner, summary)
+        log.info("Selected %d recipe(s): %d resuming, %d retrying after a failure, %d new", len(work),
+                 sum(w.attempt is not None for w in work), sum(w.retry_of is not None for w in work),
+                 sum(w.attempt is None and w.retry_of is None for w in work))
         self._prefetch_descriptions(work, options)
-        for item in work:
+        for number, item in enumerate(work, 1):
+            log.info("[%d/%d] %s", number, len(work), self._plan(item))
             if options.dry_run:
                 summary.results.append(self._dry_run(item, summary))
             else:
                 self._run_item(item, options, owner, summary)
+        log.info("Run finished: %d recipe(s), %d image request(s), %s tokens, est. $%.4f", len(summary.results),
+                 summary.images_dispatched, f"{summary.total_tokens:,}", summary.cost_usd)
         return summary
+
+    @staticmethod
+    def _plan(item: Work) -> str:
+        label = f"'{item.recipe.name}' ({str(item.recipe.id)[:8]})"
+        if item.attempt:
+            return f"{label}: resuming attempt {item.attempt.attempt_number} from {item.attempt.stage.value.replace('_', ' ')}"
+        if item.retry_of:
+            return f"{label}: new attempt {item.retry_of.attempt_number + 1}, retrying attempt {item.retry_of.attempt_number}"
+        return f"{label}: new recipe"
 
     def _select_work(self, options: Options, owner: str, summary: Summary) -> list[Work]:
         """Resumable and fresh recipes, or the single redo attempt. A refused redo is reported and yields no work."""
@@ -139,13 +157,14 @@ class Orchestrator:
             stage = item.attempt.last_successful_stage
         needs_generation = stage in (Stage.SELECTED, Stage.DESCRIBED, Stage.PROMPT_BUILT)
         if needs_generation and summary.images_dispatched >= options.max_images:
+            log.info("%s: skipped (image cap reached)", item.recipe.name)
             summary.results.append(Result(item.recipe.id, "skipped", "Image cap; no writes"))
             return
         try:
             attempt = (item.attempt if options.redo else
                        self.repository.claim(item, owner, self.lease_seconds))
         except ClaimConflict:
-            log.info("recipe %s: claim conflict; skipped", item.recipe.id)
+            log.info("%s: claim conflict (another worker has it); skipped", item.recipe.name)
             summary.results.append(Result(item.recipe.id, "skipped", "Claim conflict"))
             return
         except Exception as exc:
@@ -200,7 +219,8 @@ class Orchestrator:
                         attempt_id=attempt.id, attempt_number=attempt.attempt_number, status=outcome.status,
                         prompt_version=attempt.prompt_version or "",
                         text=runner.usage.get("text"), image=runner.usage.get("image"))
-                log.info("recipe %s: %s", work.recipe.id, outcome.status)
+                log.info("%s: %s%s", work.recipe.name, outcome.status,
+                         f" ({tokens:,} tokens, est. ${known:.4f})" if usages else "")
         except LeaseLost:
             # Never retry a rejected write, including error or release writes.
             log.warning("recipe %s: ownership lost; stopped", work.recipe.id)

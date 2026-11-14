@@ -2,6 +2,7 @@ import argparse
 import logging
 import os
 import sys
+from collections.abc import Mapping
 from contextlib import ExitStack
 from uuid import UUID
 
@@ -22,6 +23,19 @@ from .repository import PostgresRepository
 from .storage import LocalStorage, export_local
 from .uploads import HttpUploader
 
+LOG_LEVELS = ("debug", "info", "warning", "error")
+DEFAULT_LOG_LEVEL = "info"
+
+
+def resolve_log_level(verbose: bool, option: str | None, env: Mapping[str, str]) -> str:
+    """-v wins, then --log-level, then the LOG_LEVEL environment variable, then info."""
+    if verbose:
+        return "debug"
+    level = (option or env.get("LOG_LEVEL", "").strip().lower() or DEFAULT_LOG_LEVEL)
+    if level not in LOG_LEVELS:
+        raise ValueError(f"LOG_LEVEL must be one of {', '.join(LOG_LEVELS)}")
+    return level
+
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
@@ -36,8 +50,11 @@ def parser() -> argparse.ArgumentParser:
                         help="No persistent writes, leases, images, presigns or uploads; text-model calls may incur cost")
     result.add_argument("--batch-descriptions", action="store_true",
                         help="Describe up to 10 recipes per text request (saves text-model requests; results are cached on disk)")
+    result.add_argument("--log-level", type=str.lower, choices=LOG_LEVELS, default=None,
+                        help="Log level on stderr: debug (everything), info (progress; the default), warning (problems "
+                             "only), error. Also settable with the LOG_LEVEL environment variable. Secrets are redacted")
     result.add_argument("-v", "--verbose", action="store_true",
-                        help="Log progress (stage changes, skips, failures) to stderr; secrets are redacted")
+                        help="Shorthand for --log-level debug; a failed run also shows its redacted error message")
     result.add_argument("--retry-failures", action="store_true",
                         help="Resume failed attempts that saved their image; start a new linked attempt for earlier failures; never retry uncertain attempts; stops after 4 attempts per recipe (--redo overrides)")
     result.add_argument("--redo", type=UUID, help="Start a new attempt for exactly one recipe (earlier attempts stay as history)")
@@ -47,12 +64,12 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
-def configure_logging(verbose: bool) -> None:
+def configure_logging(level: str) -> None:
     """Our own logger only; SDK/HTTP loggers stay silenced in execute() because they can expose URLs."""
     logger = logging.getLogger("forkplan_images")
-    logger.setLevel(logging.DEBUG if verbose else logging.WARNING)
+    logger.setLevel(getattr(logging, level.upper()))
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-7s %(message)s", "%H:%M:%S"))
     logger.handlers = [handler]
     logger.propagate = False
 
@@ -92,14 +109,19 @@ def execute(config: Config, options: Options, batch_descriptions: bool = False) 
 
 def main(argv: list[str] | None = None) -> int:
     arguments = parser().parse_args(argv)
-    configure_logging(arguments.verbose)
+    load_dotenv()
+    try:
+        level = resolve_log_level(arguments.verbose, arguments.log_level, os.environ)
+    except ValueError as exc:
+        print(f"Configuration/usage error: {exc}", file=sys.stderr)
+        return 2
+    configure_logging(level)
     try:
         options = Options(
             limit=arguments.limit, ids=tuple(arguments.ids), max_images=arguments.max_images,
             dry_run=arguments.dry_run, retry_failures=arguments.retry_failures,
             redo=arguments.redo, note=arguments.note, release_uncertain=arguments.release_uncertain,
         )
-        load_dotenv()
         config = Config.from_environment(os.environ)
     except ValueError as exc:
         print(f"Configuration/usage error: {exc}", file=sys.stderr)
@@ -110,8 +132,8 @@ def main(argv: list[str] | None = None) -> int:
         # Driver exceptions may contain DSN credentials not recognizable as URLs: the class name is always safe to show,
         # the (redacted) message only with -v.
         print(f"Run failed ({type(exc).__name__}): check database connectivity, migration and configuration. "
-              "Re-run with -v for the redacted error.", file=sys.stderr)
-        if arguments.verbose:
+              "Re-run with -v (or --log-level debug) for the redacted error.", file=sys.stderr)
+        if level == "debug":
             detail = redact(str(exc), config.secrets).strip().splitlines()
             print("  " + (detail[0][:300] if detail else "(no message)"), file=sys.stderr)
         return 1

@@ -110,7 +110,7 @@ counts. Exit codes: **0** success/nothing to do (including ordinary claim
 conflicts or capped work), **1** any recipe failure, uncertainty, lease loss or
 refused redo, **2** usage/configuration error. A failed recipe does not stop
 other recipes. Runtime connection failures return 1 without exposing driver
-exception details beyond the error class; add `-v` to see the redacted message (for example a missing table). SDK/HTTP request logging is suppressed by the CLI; error
+exception details beyond the error class; add `-v` (or `--log-level debug`) to see the redacted message (for example a missing table). SDK/HTTP request logging is suppressed by the CLI; error
 details are redacted before database persistence and output.
 
 ## Recommended models
@@ -144,8 +144,18 @@ dish name so the image model uses its own knowledge of how the dish is served.
 
 ## Logging
 
-`-v` / `--verbose` prints progress to stderr: claims, skips, stage changes, failures and lease problems. The default shows
-warnings and errors only. Messages carry IDs and redacted error text, never prompts, URLs or credentials. SDK and HTTP
+Logs go to stderr. Choose what you see with `--log-level debug|info|warning|error` or the `LOG_LEVEL` environment
+variable (the option wins; `-v` is shorthand for `--log-level debug` and also shows the redacted message when a run
+fails). The default is `info`.
+
+| Level | What you see |
+|---|---|
+| `debug` | Everything below, plus lease renewals, saved batch descriptions being reused and other internals |
+| `info` (default) | Progress: run settings, how many recipes were selected, `[3/10]` per recipe, each stage (described, prompt built, requesting the image, generated, processed, presigned, uploaded, completed), reused descriptions, description edits, tokens and estimated cost per recipe, and a run summary |
+| `warning` | Problems only: failed or uncertain attempts, lost leases, batch fallbacks, ledger write failures. A clean run prints nothing |
+| `error` | Only things that could not be recorded, such as progress that failed to save |
+
+Messages carry short IDs, recipe names and redacted error text, never prompts, URLs or credentials. SDK and HTTP
 library logging stays silenced because it can expose URLs.
 
 ## Tokens and cost per recipe

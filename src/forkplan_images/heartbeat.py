@@ -22,6 +22,7 @@ class Heartbeat:
         while not self.stop.wait(self.seconds / 3):
             try:
                 self.repository.renew(self.attempt.id, self.attempt.lease_token, self.seconds)
+                log.debug("lease renewed for attempt %s", self.attempt.id)
             except Exception:
                 log.warning("lease renewal failed for attempt %s; stopping", self.attempt.id)
                 self.lost.set()

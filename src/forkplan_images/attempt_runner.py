@@ -50,6 +50,7 @@ class AttemptRunner:
                  on_image_dispatch: Callable[[], None]):
         self.services, self.work, self.attempt, self.heartbeat = services, work, attempt, heartbeat
         self.on_image_dispatch = on_image_dispatch
+        self.label = f"'{work.recipe.name}' ({str(work.recipe.id)[:8]})"
         self.usage: dict[str, dict[str, Any]] = {}  # {'text': ..., 'image': ...}: calls made in THIS run only
 
     def run(self) -> Outcome:
@@ -71,7 +72,7 @@ class AttemptRunner:
 
     def _advance(self, stage: Stage, **changes: Any) -> None:
         self._update(stage=stage, last_successful_stage=stage, **changes)
-        log.debug("attempt %s -> %s", self.attempt.id, stage)
+        log.info("%s: %s", self.label, stage.value.replace("_", " "))
 
     def _capture_usage(self, kind: str, provider: object) -> dict[str, Any]:
         """Remember the provider's last call usage for cost reporting, and return it as columns to persist."""
@@ -89,6 +90,7 @@ class AttemptRunner:
         services = self.services
         if self.attempt.description and self.attempt.description_version == DESCRIPTION_VERSION:
             # A retry or redo carries the earlier description: no text call, so no text_usage on this attempt.
+            log.info("%s: reusing the saved description (no text call)", self.label)
             self._advance(Stage.DESCRIBED, settings=services.settings)
             return
         try:
@@ -118,6 +120,7 @@ class AttemptRunner:
             return
         services = self.services
         self._update(stage=Stage.GENERATING)  # committed before the billed dispatch below
+        log.info("%s: requesting the image (can take a minute or two)", self.label)
 
         def dispatch() -> bytes:
             self.on_image_dispatch()
@@ -181,5 +184,5 @@ class AttemptRunner:
             if not getattr(self.attempt, f"{kind}_usage"):
                 changes[f"{kind}_usage"] = usage
         self._update(stage=status, error_type=type(exc).__name__, error_message=detail, **changes)
-        log.warning("attempt %s %s: %s", self.attempt.id, status, detail)
+        log.warning("%s: attempt %s ended as %s: %s", self.label, self.attempt.attempt_number, status, detail)
         return Outcome(str(status), detail)

@@ -1,4 +1,5 @@
 import json
+import logging
 import re
 from dataclasses import asdict
 from typing import Protocol
@@ -11,6 +12,8 @@ from .pricing import TOKEN_KEYS, build_usage, estimate_cost
 from .prompts import load_prompt
 from .state import Recipe
 from .storage import Storage
+
+log = logging.getLogger(__name__)
 
 
 class DishDescription(BaseModel):
@@ -151,6 +154,7 @@ class OpenAIDescriber:
         description = self._call(recipe, checkpoint)
         problems = style_problems(description, own_words(recipe))
         if problems:
+            log.info("description for %r needs one edit: %s", recipe.name, ", ".join(problems))
             # One bounded repair pass; both calls are counted in last_usage. Still-bad text fails the recipe.
             description = self._call(recipe, checkpoint, previous=description, problems=problems)
             problems = style_problems(description, own_words(recipe))
@@ -177,6 +181,7 @@ class OpenAIDescriber:
                 continue
             if not style_problems(text, own_words(by_id[item.id])):
                 found[item.id] = text
+        log.info("batch description: %d of %d recipes accepted", len(found), len(recipes))
         return found
 
 
@@ -196,6 +201,7 @@ class BatchedDescriber:
         missing = []
         for recipe in recipes:
             if self.storage.exists(self._key(recipe)):  # paid for in an earlier run: no request, no cost
+                log.debug("description for %r loaded from the saved batch result", recipe.name)
                 saved = json.loads(self.storage.get(self._key(recipe)))
                 self._ready[str(recipe.id)] = (saved["description"], None)
             else:

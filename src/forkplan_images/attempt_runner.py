@@ -8,6 +8,7 @@ from .descriptions import DESCRIPTION_VERSION, Describer, validate_description
 from .generation import GenerationError, Generator
 from .heartbeat import Heartbeat
 from .imaging import fingerprint, process, verify
+from .network import auth_failure_status
 from .prompts import PROMPT_VERSION, build_prompt
 from .redaction import redact
 from .repository import Repository, Work
@@ -37,6 +38,7 @@ class Services:
 class Outcome:
     status: str
     detail: str = ""
+    stop_run: bool = False  # the credentials were rejected: continuing would only repeat the failure
 
 
 class AttemptRunner:
@@ -180,9 +182,14 @@ class AttemptRunner:
                 uncertain = True
         status = Stage.UNCERTAIN if uncertain else Stage.FAILED
         detail = redact(str(exc), self.services.secrets)
+        rejected = auth_failure_status(exc)
+        if rejected:
+            service = "OpenAI" if type(exc).__module__.startswith("openai") else "A service"
+            detail = (f"{service} rejected the credentials (HTTP {rejected}). Check the API token or key in your "
+                      "configuration. Saved work is kept: fix it, then run --retry-failures.")
         for kind, usage in self.usage.items():  # calls billed this run that no stage write has saved yet
             if not getattr(self.attempt, f"{kind}_usage"):
                 changes[f"{kind}_usage"] = usage
         self._update(stage=status, error_type=type(exc).__name__, error_message=detail, **changes)
         log.warning("%s: attempt %s ended as %s: %s", self.label, self.attempt.attempt_number, status, detail)
-        return Outcome(str(status), detail)
+        return Outcome(str(status), detail, stop_run=bool(rejected))

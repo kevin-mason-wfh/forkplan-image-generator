@@ -142,6 +142,14 @@ repair call that sends the previous text back to be edited; if it still contains
 with `--retry-failures`). Recipes are sent to the text model as `<recipe>` blocks, and the image prompt opens with the
 dish name so the image model uses its own knowledge of how the dish is served.
 
+### Rejected credentials (HTTP 401/403)
+
+If any service (OpenAI, the image provider or your upload API) rejects the credentials, the run **stops immediately**
+instead of trying the next recipe, because every recipe would fail the same way and each would still pay for an image
+before its upload failed. The message says what to fix. Nothing is lost: the failed attempt keeps its saved image, and
+after you fix the token `forkplan-images --retry-failures --max-images 0 --limit 1` resumes it from where it stopped
+and uploads that image without generating a new one.
+
 ## Logging
 
 Logs go to stderr. Choose what you see with `--log-level debug|info|warning|error` or the `LOG_LEVEL` environment

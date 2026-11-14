@@ -30,6 +30,16 @@ def retry_call(operation: Callable[[], T], retryable: Callable[[Exception], bool
     raise AssertionError("unreachable")
 
 
+def auth_failure_status(exc: BaseException) -> int | None:
+    """401/403 from any HTTP or SDK error (or its cause): the credentials are wrong, so every recipe would fail too."""
+    for error in (exc, exc.__cause__):
+        response = getattr(error, "response", None)
+        code = getattr(error, "status_code", None) or getattr(response, "status_code", None)
+        if code in (401, 403):
+            return code
+    return None
+
+
 def require_https(url: str) -> str:
     parts = urlsplit(url)
     if parts.scheme != "https" or not parts.hostname or parts.username or parts.password:

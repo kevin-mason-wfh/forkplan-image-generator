@@ -143,6 +143,8 @@ def main(argv: list[str] | None = None) -> int:
               (f" [{result.tokens:,} tokens, est. ${result.cost_usd:.4f}]" if result.cost_usd is not None else ""))
     print(f"Recipes considered: {len(summary.results)}; image requests dispatched: {summary.images_dispatched}; "
           f"uncertain: {sum(r.status == 'generation_uncertain' for r in summary.results)}")
+    if summary.stopped_because:
+        print(f"Run stopped early: {redact(summary.stopped_because, config.secrets)}", file=sys.stderr)
     note = f" ({summary.unpriced_calls} call(s) unpriced: no rate configured)" if summary.unpriced_calls else ""
     print(f"Tokens this run: {summary.total_tokens:,}; estimated cost: ${summary.cost_usd:.4f}{note}; usage saved per attempt")
     return summary.exit_code

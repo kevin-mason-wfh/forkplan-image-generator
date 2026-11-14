@@ -315,3 +315,64 @@ def test_dry_run_of_a_retry_makes_no_text_call(tmp_path):
     assert result.results[0].status == "dry_run" and "new attempt" in result.results[0].detail
     describe.describe.assert_not_called()
     generate.generate.assert_not_called()
+
+
+class _Rejected(Exception):
+    status_code = 401
+
+
+def _http_error(status):
+    import httpx
+    request = httpx.Request("POST", "https://api.example.test/presign")
+    return httpx.HTTPStatusError("rejected", request=request, response=httpx.Response(status, request=request))
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_rejected_upload_credentials_stop_the_run_and_the_saved_image_is_uploaded_on_retry(tmp_path, status):
+    runner, repo, store, _, generate, upload, recipes = setup(tmp_path, 3)
+    good_presign = upload.presign.side_effect
+    upload.presign.side_effect = _http_error(status)
+    result = runner.run(Options(limit=3, max_images=3))
+    assert generate.generate.call_count == 1  # the other recipes did not each pay for an image that cannot be uploaded
+    assert len(result.results) == 1 and result.exit_code == 1
+    assert "rejected the credentials" in result.stopped_because and str(status) in result.stopped_because
+    assert len(repo.attempts) == 1  # the other recipes were not even claimed
+    (a,) = repo.attempts.values()
+    assert a.stage == Stage.FAILED and a.last_successful_stage == Stage.PROCESSED
+    upload.presign.side_effect = good_presign  # the token is fixed
+    retry = runner.run(Options(retry_failures=True, max_images=0, limit=1))
+    assert retry.exit_code == 0 and repo.attempts[a.id].stage == Stage.COMPLETED
+    assert generate.generate.call_count == 1  # the saved image was uploaded, no new image was generated
+
+
+def test_rejected_text_credentials_stop_before_any_image_is_requested(tmp_path):
+    runner, repo, _, describe, generate, _, _ = setup(tmp_path, 3)
+    describe.describe.side_effect = _Rejected("Incorrect API key")
+    result = runner.run(Options(limit=3, max_images=3))
+    assert len(result.results) == 1 and "rejected the credentials" in result.stopped_because
+    describe.describe.assert_called_once()
+    generate.generate.assert_not_called()
+
+
+def test_other_http_errors_do_not_stop_the_run(tmp_path):
+    runner, repo, _, _, generate, upload, _ = setup(tmp_path, 3)
+    upload.presign.side_effect = _http_error(404)
+    result = runner.run(Options(limit=3, max_images=3))
+    assert len(result.results) == 3 and result.stopped_because is None
+
+
+def test_dry_run_stops_on_rejected_credentials(tmp_path):
+    runner, _, _, describe, _, _, _ = setup(tmp_path, 3)
+    describe.describe.side_effect = _Rejected("Incorrect API key")
+    result = runner.run(Options(limit=3, dry_run=True))
+    assert len(result.results) == 1 and result.stopped_because and result.exit_code == 1
+
+
+def test_auth_failure_status_reads_sdk_http_and_wrapped_errors():
+    from forkplan_images.network import auth_failure_status
+    assert auth_failure_status(_Rejected()) == 401
+    assert auth_failure_status(_http_error(403)) == 403
+    assert auth_failure_status(_http_error(500)) is None and auth_failure_status(ValueError("x")) is None
+    wrapped = RuntimeError("generation failed")
+    wrapped.__cause__ = _http_error(401)
+    assert auth_failure_status(wrapped) == 401

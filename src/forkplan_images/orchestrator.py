@@ -7,6 +7,7 @@ from .attempt_runner import AttemptRunner, ExportCopy, Services
 from .descriptions import BatchedDescriber, Describer, validate_description
 from .generation import Generator
 from .heartbeat import Heartbeat
+from .network import auth_failure_status
 from .pricing import CostLedger, total_cost, total_tokens
 from .prompts import build_prompt
 from .redaction import redact
@@ -56,14 +57,15 @@ class Summary:
     cost_usd: float = 0.0
     unpriced_calls: int = 0
     total_tokens: int = 0
+    stopped_because: str | None = None  # set when the run ended early, e.g. rejected credentials
 
     def count_image_dispatch(self) -> None:
         self.images_dispatched += 1
 
     @property
     def exit_code(self) -> int:
-        return int(any(r.status in ("failed", "generation_uncertain", "lease_lost")
-                       for r in self.results))
+        return int(bool(self.stopped_because) or any(r.status in ("failed", "generation_uncertain", "lease_lost")
+                                                     for r in self.results))
 
 
 class Orchestrator:
@@ -97,6 +99,9 @@ class Orchestrator:
                 summary.results.append(self._dry_run(item, summary))
             else:
                 self._run_item(item, options, owner, summary)
+            if summary.stopped_because:
+                log.error("Stopping the run: %s", summary.stopped_because)
+                break
         log.info("Run finished: %d recipe(s), %d image request(s), %s tokens, est. $%.4f", len(summary.results),
                  summary.images_dispatched, f"{summary.total_tokens:,}", summary.cost_usd)
         return summary
@@ -149,6 +154,8 @@ class Orchestrator:
             build_prompt(item.recipe, description)
             return Result(item.recipe.id, "dry_run", "Description validated; would generate and upload")
         except Exception as exc:
+            if rejected := auth_failure_status(exc):
+                summary.stopped_because = f"A service rejected the credentials (HTTP {rejected}). Check your keys."
             return Result(item.recipe.id, "failed", redact(str(exc), self.secrets))
 
     def _run_item(self, item: Work, options: Options, owner: str, summary: Summary) -> None:
@@ -208,6 +215,8 @@ class Orchestrator:
                 runner = AttemptRunner(self._services(), work, attempt, heartbeat, summary.count_image_dispatch)
                 outcome = runner.run()
                 attempt = runner.attempt
+                if outcome.stop_run:
+                    summary.stopped_because = outcome.detail
                 usages = list(runner.usage.values())
                 known = self._add_to_summary(summary, *usages)
                 tokens = total_tokens(*usages)

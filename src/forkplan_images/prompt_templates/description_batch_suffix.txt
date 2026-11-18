@@ -1,0 +1,1 @@
+Several <recipe> blocks follow, each with an id. Apply every rule to each recipe independently and return one paragraph per recipe in the structured output, copying its id unchanged.

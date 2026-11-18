@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "forkplan-image-generator"
+version = "0.1.0"
+description = "Resumable recipe image generation"
+requires-python = ">=3.11"
+dependencies = [
+  "openai==2.54.0",
+  "Pillow==13.0.0",
+  "SQLAlchemy==2.1.6",
+  "psycopg[binary]==3.3.6",
+  "httpx==0.28.1",
+  "python-dotenv==1.2.4",
+]
+
+[project.optional-dependencies]
+test = ["pytest==9.1.1", "respx==0.23.1"]
+dev = ["ruff==0.17.4"]
+
+[project.scripts]
+forkplan-images = "forkplan_images.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+forkplan_images = ["prompt_templates/*.txt"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "C4", "RET"]
+ignore = ["E501"]
